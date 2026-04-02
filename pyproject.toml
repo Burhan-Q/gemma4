@@ -1,0 +1,12 @@
+[project]
+name = "gemma4"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fiftyone",
+    "huggingface-hub",
+    "transformers>=4.52.0",
+    "torch>=2.0.0",
+    "torchvision",
+    "accelerate",
+]
