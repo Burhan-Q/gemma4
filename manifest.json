@@ -1,0 +1,170 @@
+{
+    "models": [
+        {
+            "base_name": "google/gemma-4-E2B-it",
+            "base_filename": "gemma-4-E2B-it",
+            "author": "Google DeepMind",
+            "version": null,
+            "url": null,
+            "source": "https://huggingface.co/google/gemma-4-E2B-it",
+            "license": "gemma (https://ai.google.dev/gemma/terms)",
+            "description": "Gemma 4 E2B is a 2.3B effective parameter multimodal model supporting text, image, video, and audio. Image operations: detect, point, classify, vqa. Video operations: description, temporal_localization, tracking, ocr, comprehensive, custom.",
+            "size_bytes": null,
+            "manager": null,
+            "default_deployment_config_dict": null,
+            "requirements": {
+                "packages": [
+                    "huggingface-hub",
+                    "transformers>=4.52.0",
+                    "torch",
+                    "torchvision",
+                    "accelerate"
+                ],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            },
+            "tags": [
+                "detection",
+                "classification",
+                "keypoints",
+                "vqa",
+                "temporal-detections",
+                "torch",
+                "zero-shot",
+                "image",
+                "video",
+                "VLM"
+            ],
+            "date_added": "2026-04-02T00:00:00",
+            "training_data": null
+        },
+        {
+            "base_name": "google/gemma-4-E4B-it",
+            "base_filename": "gemma-4-E4B-it",
+            "author": "Google DeepMind",
+            "version": null,
+            "url": null,
+            "source": "https://huggingface.co/google/gemma-4-E4B-it",
+            "license": "gemma (https://ai.google.dev/gemma/terms)",
+            "description": "Gemma 4 E4B is a 4.5B effective parameter multimodal model supporting text, image, video, and audio. Image operations: detect, point, classify, vqa. Video operations: description, temporal_localization, tracking, ocr, comprehensive, custom.",
+            "size_bytes": null,
+            "manager": null,
+            "default_deployment_config_dict": null,
+            "requirements": {
+                "packages": [
+                    "huggingface-hub",
+                    "transformers>=4.52.0",
+                    "torch",
+                    "torchvision",
+                    "accelerate"
+                ],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            },
+            "tags": [
+                "detection",
+                "classification",
+                "keypoints",
+                "vqa",
+                "temporal-detections",
+                "torch",
+                "zero-shot",
+                "image",
+                "video",
+                "VLM"
+            ],
+            "date_added": "2026-04-02T00:00:00",
+            "training_data": null
+        },
+        {
+            "base_name": "google/gemma-4-26B-A4B-it",
+            "base_filename": "gemma-4-26B-A4B-it",
+            "author": "Google DeepMind",
+            "version": null,
+            "url": null,
+            "source": "https://huggingface.co/google/gemma-4-26B-A4B-it",
+            "license": "gemma (https://ai.google.dev/gemma/terms)",
+            "description": "Gemma 4 26B-A4B is a 3.8B active parameter (25.2B total) MoE multimodal model supporting text and image. Image operations: detect, point, classify, vqa. No video support.",
+            "size_bytes": null,
+            "manager": null,
+            "default_deployment_config_dict": null,
+            "requirements": {
+                "packages": [
+                    "huggingface-hub",
+                    "transformers>=4.52.0",
+                    "torch",
+                    "torchvision",
+                    "accelerate"
+                ],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            },
+            "tags": [
+                "detection",
+                "classification",
+                "keypoints",
+                "vqa",
+                "torch",
+                "zero-shot",
+                "image",
+                "VLM"
+            ],
+            "date_added": "2026-04-02T00:00:00",
+            "training_data": null
+        },
+        {
+            "base_name": "google/gemma-4-31B-it",
+            "base_filename": "gemma-4-31B-it",
+            "author": "Google DeepMind",
+            "version": null,
+            "url": null,
+            "source": "https://huggingface.co/google/gemma-4-31B-it",
+            "license": "gemma (https://ai.google.dev/gemma/terms)",
+            "description": "Gemma 4 31B is a 30.7B dense multimodal model supporting text and image. Image operations: detect, point, classify, vqa. No video support.",
+            "size_bytes": null,
+            "manager": null,
+            "default_deployment_config_dict": null,
+            "requirements": {
+                "packages": [
+                    "huggingface-hub",
+                    "transformers>=4.52.0",
+                    "torch",
+                    "torchvision",
+                    "accelerate"
+                ],
+                "cpu": {
+                    "support": true
+                },
+                "gpu": {
+                    "support": true
+                }
+            },
+            "tags": [
+                "detection",
+                "classification",
+                "keypoints",
+                "vqa",
+                "torch",
+                "zero-shot",
+                "image",
+                "VLM"
+            ],
+            "date_added": "2026-04-02T00:00:00",
+            "training_data": null
+        }
+    ],
+    "name": "gemma4",
+    "url": "https://github.com/Burhan-Q/gemma4"
+}
