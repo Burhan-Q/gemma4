@@ -167,6 +167,15 @@ def get_device() -> str:
     return "cpu"
 
 
+def _identity_collate(batch):
+    """Identity collation — prevents numpy stacking of variable-size inputs.
+
+    Must be a module-level function (not a nested/lambda) so that it is
+    picklable by the multiprocessing DataLoader workers.
+    """
+    return batch
+
+
 # =============================================================================
 # Shared GetItem
 # =============================================================================
@@ -284,10 +293,7 @@ class Gemma4BaseModel(
 
     @property
     def collate_fn(self):
-        def identity_collate(batch):
-            return batch
-
-        return identity_collate
+        return _identity_collate
 
     # -------------------------------------------------------------------------
     # SupportsGetItem
