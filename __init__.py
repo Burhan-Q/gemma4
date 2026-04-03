@@ -77,13 +77,20 @@ def load_model(model_name: str = None, model_path: str = None, **kwargs):
             custom_prompt (str): Required when operation="custom".
 
             --- Shared generation params ---
-            max_new_tokens (int): Default 512.
+            max_new_tokens (int): Default 2048.
             do_sample (bool):     Default True.
             temperature (float):  Default 1.0.
             top_p (float):        Default 0.95.
             top_k (int):          Default 64.
             repetition_penalty (float): Default 1.0.
             enable_thinking (bool): Default False.
+            max_soft_tokens (int): Vision token budget per image.
+                              One of 70, 140, 280, 560, 1120.
+                              Default varies by operation: 560 for detect/point/ocr,
+                              280 for vqa/caption/classify. User override respected.
+            cache_implementation (str): KV cache strategy for generate().
+                              "static" pre-allocates cache (used in official examples).
+                              Default: None (transformers default).
 
     Returns:
         Gemma4ImageModel or Gemma4VideoModel
@@ -243,6 +250,29 @@ def resolve_input(model_name: str, ctx):
         description=(
             "Enable Gemma 4 reasoning mode. The model will show "
             "step-by-step reasoning before the final answer."
+        ),
+    )
+
+    inputs.int(
+        "max_soft_tokens",
+        default=280,
+        label="Vision Token Budget",
+        description=(
+            "Tokens per image (70, 140, 280, 560, 1120). "
+            "Default varies by operation: 560 for detect/point/ocr, "
+            "280 for vqa/caption/classify."
+        ),
+    )
+
+    inputs.str(
+        "cache_implementation",
+        default=None,
+        required=False,
+        label="Cache Implementation",
+        description=(
+            "KV cache strategy for generate(). "
+            "'static' pre-allocates cache (used in official Gemma4 examples). "
+            "Leave empty for default."
         ),
     )
 

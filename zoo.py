@@ -11,6 +11,13 @@ Architecture:
     Gemma4BaseConfig / Gemma4BaseModel
         ├── Gemma4ImageModelConfig / Gemma4ImageModel  (media_type="image")
         └── Gemma4VideoModelConfig / Gemma4VideoModel  (media_type="video")
+
+Inference pipeline:
+    apply_chat_template (with tools= for structured ops)
+    → model.generate
+    → processor.decode (skip_special_tokens=False)
+    → processor.parse_response → {role, thinking, content, tool_calls}
+    → extract tool_calls arguments (structured) or content text (free-form)
 """
 
 import json
@@ -27,7 +34,7 @@ import fiftyone.utils.torch as fout
 from fiftyone.core.models import SupportsGetItem, TorchModelMixin
 from fiftyone.utils.torch import GetItem
 
-from transformers import AutoModelForMultimodalLM, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -36,37 +43,42 @@ logger = logging.getLogger(__name__)
 # Image operation system prompts
 # =============================================================================
 
+_TOOL_RULES = (
+    "\n\nYou MUST call the tool immediately. "
+    "Do not output any text before calling the tool. "
+    "Do not describe, reason, or explain — just call the tool.\n"
+    "JSON: double quotes, no trailing commas, integers unquoted."
+)
+
 DEFAULT_DETECT_SYSTEM_PROMPT = (
-    "You are a helpful assistant to detect objects in images. "
-    "When asked to detect elements based on a description you return bounding boxes "
-    "for all elements in the form of [xmin, ymin, xmax, ymax] with the values being "
-    "scaled between 0 and 1000. When there are more than one result, answer with a list "
-    "of bounding boxes in the form of [[xmin, ymin, xmax, ymax], ...]. "
-    "Return results as JSON array: "
-    '[{"bbox_2d": [xmin, ymin, xmax, ymax], "label": "object_name"}, ...].'
+    "You are an object detection assistant. "
+    "Detect EVERY distinct object in the image. "
+    "Each object MUST be a separate entry in the detections array — "
+    "if you see 5 objects, return 5 entries. "
+    "Call the report_detections tool with ALL detections. "
+    "Bounding box format: box_2d as [y1, x1, y2, x2] integers 0-1000."
+    + _TOOL_RULES
 )
 
 DEFAULT_POINT_SYSTEM_PROMPT = (
-    "You are a helpful assistant to point to objects in images. "
-    "When asked to point to elements based on a description you return center coordinates "
-    "for all elements in the form of [x, y] with the values being "
-    "scaled between 0 and 1000. When there are more than one result, answer with a list "
-    "of coordinates in the form of [[x, y], ...]. "
-    "Return results as JSON array: "
-    '[{"point_2d": [x, y], "label": "object_name"}, ...].'
+    "You are a keypoint detection assistant. "
+    "Point to the center of EVERY requested object. "
+    "Each object MUST be a separate entry in the points array. "
+    "Call the report_points tool with ALL points. "
+    "Point format: point_2d as [y, x] integers 0-1000."
+    + _TOOL_RULES
 )
 
 DEFAULT_CLASSIFY_SYSTEM_PROMPT = (
-    "You are a helpful assistant specializing in comprehensive image classification. "
-    "Analyze the image and return classifications as a JSON array: "
-    '[{"label": "class_name"}]. '
-    "Multiple relevant classifications can be provided unless single-class output is "
-    "explicitly requested."
+    "You are an image classification assistant. "
+    "Return ALL applicable labels. "
+    "Call the report_classifications tool."
+    + _TOOL_RULES
 )
 
 DEFAULT_VQA_SYSTEM_PROMPT = (
-    "You are a helpful assistant. Provide clear and concise answers to questions about "
-    "images in natural language English."
+    "You are a helpful assistant. Provide clear and concise answers to "
+    "questions about images in natural language English."
 )
 
 DEFAULT_CAPTION_SYSTEM_PROMPT = (
@@ -75,9 +87,10 @@ DEFAULT_CAPTION_SYSTEM_PROMPT = (
 )
 
 DEFAULT_OCR_SYSTEM_PROMPT = (
-    "You are a helpful assistant specializing in optical character recognition. "
-    "Extract all visible text from the image. Return only the extracted text, "
-    "preserving the original layout and formatting as much as possible."
+    "You are a helpful assistant specializing in optical character "
+    "recognition. Extract all visible text from the image. Return only "
+    "the extracted text, preserving the original layout and formatting "
+    "as much as possible."
 )
 
 IMAGE_OPERATIONS: Dict[str, str] = {
@@ -87,6 +100,102 @@ IMAGE_OPERATIONS: Dict[str, str] = {
     "vqa": DEFAULT_VQA_SYSTEM_PROMPT,
     "caption": DEFAULT_CAPTION_SYSTEM_PROMPT,
     "ocr": DEFAULT_OCR_SYSTEM_PROMPT,
+}
+
+
+# =============================================================================
+# Tool definitions for structured operations (detect, point, classify)
+# =============================================================================
+
+_DETECT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "report_detections",
+        "description": "Report detected objects with bounding boxes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "detections": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "box_2d": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "[y1, x1, y2, x2] 0-1000",
+                            },
+                        },
+                        "required": ["label", "box_2d"],
+                    },
+                }
+            },
+            "required": ["detections"],
+        },
+    },
+}
+
+_POINT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "report_points",
+        "description": "Report detected keypoints.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "points": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "point_2d": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "[x, y] center point 0-1000",
+                            },
+                        },
+                        "required": ["label", "point_2d"],
+                    },
+                }
+            },
+            "required": ["points"],
+        },
+    },
+}
+
+_CLASSIFY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "report_classifications",
+        "description": "Report image classification labels.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "labels": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                        },
+                        "required": ["label"],
+                    },
+                }
+            },
+            "required": ["labels"],
+        },
+    },
+}
+
+_OPERATION_TOOLS: Dict[str, Optional[list]] = {
+    "detect": [_DETECT_TOOL],
+    "point": [_POINT_TOOL],
+    "classify": [_CLASSIFY_TOOL],
+    "vqa": None,
+    "caption": None,
+    "ocr": None,
 }
 
 
@@ -142,12 +251,9 @@ VIDEO_OPERATIONS: Dict[str, Dict] = {
             'Output in JSON: [{"time": "mm:ss.ff", "text": "...", "bbox_2d": [...]}, ...]'
         )
     },
-    "custom": {
-        "prompt": None  # user-supplied via custom_prompt config param
-    },
+    "custom": {"prompt": None},
 }
 
-# Models that support video (E2B and E4B only)
 _VIDEO_CAPABLE_MODELS = {
     "google/gemma-4-E2B-it",
     "google/gemma-4-E4B-it",
@@ -155,7 +261,7 @@ _VIDEO_CAPABLE_MODELS = {
 
 
 # =============================================================================
-# Device helper
+# Helpers
 # =============================================================================
 
 def get_device() -> str:
@@ -168,11 +274,7 @@ def get_device() -> str:
 
 
 def _identity_collate(batch):
-    """Identity collation — prevents numpy stacking of variable-size inputs.
-
-    Must be a module-level function (not a nested/lambda) so that it is
-    picklable by the multiprocessing DataLoader workers.
-    """
+    """Module-level identity collate (picklable for DataLoader workers)."""
     return batch
 
 
@@ -181,10 +283,7 @@ def _identity_collate(batch):
 # =============================================================================
 
 class Gemma4GetItem(GetItem):
-    """Lightweight DataLoader transform for Gemma4 models.
-
-    Extracts filepath, optional per-sample prompt, and sample metadata.
-    """
+    """Extracts filepath, optional per-sample prompt, and metadata."""
 
     @property
     def required_keys(self) -> List[str]:
@@ -213,7 +312,8 @@ class Gemma4BaseConfig(fout.TorchImageModelConfig):
         self.model_path = self.parse_string(
             d, "model_path", default="google/gemma-4-E4B-it"
         )
-        self.max_new_tokens = self.parse_number(d, "max_new_tokens", default=512)
+        # Higher default to accommodate model thinking before tool calls
+        self.max_new_tokens = self.parse_number(d, "max_new_tokens", default=2048)
         self.do_sample = self.parse_bool(d, "do_sample", default=True)
         self.temperature = self.parse_number(d, "temperature", default=1.0)
         self.top_p = self.parse_number(d, "top_p", default=0.95)
@@ -222,6 +322,13 @@ class Gemma4BaseConfig(fout.TorchImageModelConfig):
             d, "repetition_penalty", default=1.0
         )
         self.enable_thinking = self.parse_bool(d, "enable_thinking", default=False)
+        # Vision token budget per image: 70, 140, 280, 560, 1120
+        self.max_soft_tokens = self.parse_number(d, "max_soft_tokens", default=280)
+        # KV cache strategy passed to model.generate(). "static" pre-allocates
+        # and is used in official Gemma4 examples. None uses the default.
+        self.cache_implementation = self.parse_string(
+            d, "cache_implementation", default=None
+        )
 
 
 # =============================================================================
@@ -231,14 +338,7 @@ class Gemma4BaseConfig(fout.TorchImageModelConfig):
 class Gemma4BaseModel(
     fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMixin
 ):
-    """Shared base for image and video Gemma 4 zoo models.
-
-    Provides:
-    - Model loading (_load_model) with hardware-appropriate dtype
-    - Reasoning extraction (_extract_reasoning)
-    - JSON extraction (_extract_json)
-    - All FiftyOne batching boilerplate
-    """
+    """Shared base for image and video Gemma 4 zoo models."""
 
     def __init__(self, config: Gemma4BaseConfig):
         fom.SamplesMixin.__init__(self)
@@ -248,16 +348,10 @@ class Gemma4BaseModel(
         self.config = config
         self.device = get_device()
         self._fields: dict = {}
-
-        # Lazy loading
         self._model = None
         self._processor = None
 
-        logger.info(f"Initialized {self.__class__.__name__} (device: {self.device})")
-
-    # -------------------------------------------------------------------------
-    # Required Model / SamplesMixin properties
-    # -------------------------------------------------------------------------
+    # -- FiftyOne boilerplate --------------------------------------------------
 
     @property
     def transforms(self):
@@ -283,10 +377,6 @@ class Gemma4BaseModel(
     def needs_fields(self, fields: dict):
         self._fields = fields
 
-    # -------------------------------------------------------------------------
-    # TorchModelMixin — custom collation
-    # -------------------------------------------------------------------------
-
     @property
     def has_collate_fn(self) -> bool:
         return True
@@ -295,108 +385,190 @@ class Gemma4BaseModel(
     def collate_fn(self):
         return _identity_collate
 
-    # -------------------------------------------------------------------------
-    # SupportsGetItem
-    # -------------------------------------------------------------------------
-
     def build_get_item(self, field_mapping=None) -> Gemma4GetItem:
         return Gemma4GetItem(field_mapping=field_mapping)
 
-    # -------------------------------------------------------------------------
-    # Model loading
-    # -------------------------------------------------------------------------
+    # -- Model loading ---------------------------------------------------------
 
     def _load_model(self):
-        """Lazy-load Gemma 4 model and processor.
-
-        Uses bfloat16 on Ampere+ GPUs (compute capability >= 8.0), else auto.
-        """
-        logger.info(f"Loading Gemma 4 model from {self.config.model_path}")
+        """Lazy-load model and processor. bfloat16 on Ampere+ GPUs."""
+        logger.info(f"Loading Gemma 4 from {self.config.model_path}")
 
         model_kwargs: dict = {"device_map": self.device}
-
         if self.device == "cuda" and torch.cuda.is_available():
-            capability = torch.cuda.get_device_capability(self.device)
-            if capability[0] >= 8:
-                model_kwargs["torch_dtype"] = torch.bfloat16
-                logger.info("Using bfloat16 (Ampere+ GPU detected)")
-            else:
-                model_kwargs["torch_dtype"] = "auto"
+            cap = torch.cuda.get_device_capability(self.device)
+            model_kwargs["torch_dtype"] = (
+                torch.bfloat16 if cap[0] >= 8 else "auto"
+            )
         else:
             model_kwargs["torch_dtype"] = "auto"
 
-        self._model = AutoModelForMultimodalLM.from_pretrained(
-            self.config.model_path,
-            **model_kwargs,
+        self._model = AutoModelForImageTextToText.from_pretrained(
+            self.config.model_path, **model_kwargs
         ).eval()
 
-        self._processor = AutoProcessor.from_pretrained(
-            self.config.model_path,
-        )
+        self._processor = AutoProcessor.from_pretrained(self.config.model_path)
 
-        # Suppress "Setting pad_token_id to eos_token_id" warning
         if hasattr(self._processor, "tokenizer"):
             self._model.generation_config.pad_token_id = (
                 self._processor.tokenizer.eos_token_id
             )
+        logger.info("Model loaded")
 
-        logger.info("Model loaded successfully")
+    # -- Shared inference ------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # Shared utilities
-    # -------------------------------------------------------------------------
+    def _generate(self, messages: list, tools: list = None) -> dict:
+        """Core generate + parse_response pipeline.
 
-    def _extract_reasoning(self, text: str) -> Tuple[Optional[str], str]:
-        """Split model output on </think>.
+        Returns the parsed response dict from processor.parse_response():
+            {"role": "assistant", "thinking": ..., "content": ..., "tool_calls": ...}
 
-        Returns:
-            (reasoning_or_None, prediction_text)
+        Falls back to {"content": decoded_text} if parse_response fails.
         """
-        if "</think>" in text:
-            parts = text.split("</think>", 1)
-            reasoning = parts[0].strip()
-            prediction = parts[1].strip()
-            return (reasoning if reasoning else None), prediction
-        return None, text
+        if self._model is None:
+            self._load_model()
+
+        device = next(self._model.parameters()).device
+
+        chat_kwargs = {"enable_thinking": self.config.enable_thinking}
+        if tools:
+            chat_kwargs["tools"] = tools
+
+        # Pass max_soft_tokens to control vision token budget
+        proc_kwargs = {}
+        if self.config.max_soft_tokens != 280:
+            proc_kwargs["images_kwargs"] = {
+                "max_soft_tokens": self.config.max_soft_tokens
+            }
+
+        inputs = self._processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+            processor_kwargs=proc_kwargs or None,
+            **chat_kwargs,
+        ).to(device)
+
+        input_len = inputs["input_ids"].shape[-1]
+
+        gen_kwargs = {
+            "max_new_tokens": self.config.max_new_tokens,
+            "do_sample": self.config.do_sample,
+            "repetition_penalty": self.config.repetition_penalty,
+        }
+        if self.config.do_sample:
+            gen_kwargs["temperature"] = self.config.temperature
+            gen_kwargs["top_p"] = self.config.top_p
+            gen_kwargs["top_k"] = self.config.top_k
+        if self.config.cache_implementation:
+            gen_kwargs["cache_implementation"] = self.config.cache_implementation
+
+        with torch.no_grad():
+            try:
+                output_ids = self._model.generate(**inputs, **gen_kwargs)
+            except (IndexError, RuntimeError):
+                if "cache_implementation" in gen_kwargs:
+                    logger.warning(
+                        "cache_implementation='%s' failed, retrying without it",
+                        gen_kwargs.pop("cache_implementation"),
+                    )
+                    output_ids = self._model.generate(**inputs, **gen_kwargs)
+                else:
+                    raise
+
+        generated = output_ids[0][input_len:]
+
+        # Always use parse_response — it properly separates thinking/content/tool_calls
+        raw = self._processor.decode(generated, skip_special_tokens=False)
+        try:
+            parsed = self._processor.parse_response(raw)
+            if isinstance(parsed, dict):
+                parsed["_raw"] = raw  # Keep raw for fallback parsing
+                return parsed
+        except Exception as e:
+            logger.debug(f"parse_response failed: {e}")
+
+        # Fallback: plain decode
+        return {
+            "content": self._processor.decode(
+                generated, skip_special_tokens=True
+            )
+        }
+
+    # -- JSON extraction -------------------------------------------------------
+
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """Minimal repair of trivial JSON errors from LLM output.
+
+        SCOPE: Only fixes comma and bracket issues. Do NOT expand this
+        method to handle arbitrary malformed JSON.
+        """
+        s = text.strip()
+        s = re.sub(r",{2,}", ",", s)
+        s = re.sub(r",\s*([}\]])", r"\1", s)
+        s = re.sub(r"(\[|{)\s*,", r"\1", s)
+        while s.startswith("[[") and s.endswith("]]"):
+            inner = s[1:-1]
+            try:
+                json.loads(inner)
+                s = inner
+            except json.JSONDecodeError:
+                break
+        return s
 
     def _extract_json(self, text: str) -> Optional[Any]:
-        """Extract and parse JSON from model output.
+        """Extract JSON from model text output."""
+        if not text or not text.strip():
+            return None
 
-        Handles markdown-fenced ```json blocks and raw JSON.
-        """
-        json_match = re.search(
-            r"```json\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL
-        )
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            start_bracket = text.find("[")
-            start_brace = text.find("{")
-
-            if start_bracket == -1 and start_brace == -1:
+        def _try(s):
+            try:
+                return json.loads(s)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            try:
+                return json.loads(self._repair_json(s))
+            except (json.JSONDecodeError, ValueError):
                 return None
 
-            if start_bracket != -1 and (
-                start_brace == -1 or start_bracket < start_brace
-            ):
-                end = text.rfind("]")
-                json_str = text[start_bracket : end + 1] if end != -1 else None
-            else:
-                end = text.rfind("}")
-                json_str = text[start_brace : end + 1] if end != -1 else None
+        # 1. Markdown fence
+        m = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+        if m:
+            r = _try(m.group(1))
+            if r is not None:
+                return r
 
-        if not json_str:
-            return None
+        # 2. Direct parse
+        stripped = text.strip()
+        if stripped.startswith(("[", "{")):
+            r = _try(stripped)
+            if r is not None:
+                return r
 
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            logger.debug(f"Failed to parse JSON: {json_str[:200]}")
-            return None
+        # 3. Balanced bracket matching
+        for sc, ec in [("[", "]"), ("{", "}")]:
+            start = text.find(sc)
+            if start == -1:
+                continue
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == sc:
+                    depth += 1
+                elif text[i] == ec:
+                    depth -= 1
+                    if depth == 0:
+                        r = _try(text[start : i + 1])
+                        if r is not None:
+                            return r
+                        break
 
-    # -------------------------------------------------------------------------
-    # Generation parameter properties
-    # -------------------------------------------------------------------------
+        logger.debug(f"No JSON found in: {text[:500]}")
+        return None
+
+    # -- Generation parameter properties ---------------------------------------
 
     @property
     def max_new_tokens(self) -> int:
@@ -454,10 +626,6 @@ class Gemma4BaseModel(
     def enable_thinking(self, value: bool):
         self.config.enable_thinking = value
 
-    # -------------------------------------------------------------------------
-    # Context manager
-    # -------------------------------------------------------------------------
-
     def __enter__(self):
         return self
 
@@ -470,51 +638,56 @@ class Gemma4BaseModel(
 
 
 # =============================================================================
-# Image config
+# Image config & model
 # =============================================================================
 
+# Default max_soft_tokens per operation when not explicitly set by user
+# Diagnostic testing showed 280 performs comparably to 560 for detection
+# while being faster. OCR benefits from higher resolution.
+_OPERATION_SOFT_TOKEN_DEFAULTS = {
+    "detect": 280,
+    "point": 280,
+    "classify": 280,
+    "vqa": 280,
+    "caption": 280,
+    "ocr": 560,
+}
+
+
 class Gemma4ImageModelConfig(Gemma4BaseConfig):
-    """Configuration for the Gemma 4 image model."""
-
     def __init__(self, d: dict):
-        super().__init__(d)
+        # Set operation-aware max_soft_tokens default before super().__init__
+        # so the base class picks it up, but only if user didn't set it
+        if "max_soft_tokens" not in d:
+            op = d.get("operation", "vqa")
+            d["max_soft_tokens"] = _OPERATION_SOFT_TOKEN_DEFAULTS.get(op, 280)
 
+        super().__init__(d)
         self.operation = self.parse_string(d, "operation", default="vqa")
         if self.operation not in IMAGE_OPERATIONS:
             raise ValueError(
                 f"Invalid image operation: '{self.operation}'. "
                 f"Must be one of {list(IMAGE_OPERATIONS.keys())}"
             )
-
         self.prompt = self.parse_string(d, "prompt", default=None)
         self.system_prompt = self.parse_string(d, "system_prompt", default=None)
 
 
-# =============================================================================
-# Image model
-# =============================================================================
-
 class Gemma4ImageModel(Gemma4BaseModel):
     """FiftyOne zoo model for Gemma 4 image understanding.
 
-    Operations:
-        detect   - fo.Detections (bbox_2d, 0-1000 scale)
-        point    - fo.Keypoints  ([x,y], 0-1000 scale)
-        classify - fo.Classifications
-        vqa      - str
+    Structured operations (detect, point, classify) use function calling
+    via tools= parameter. Text operations (vqa, caption, ocr) use plain
+    generation. All outputs go through parse_response for clean separation
+    of thinking/content/tool_calls.
 
-    All coordinates are in 0-1000 scale from the model, normalized to [0,1]
-    on output. Reasoning chains (text before </think>) are stored as a
-    'reasoning' attribute on each label.
+    Returns single FiftyOne Label instances (not dicts) for compatibility
+    with label_field nesting.
     """
 
     @property
     def media_type(self) -> str:
         return "image"
-
-    # -------------------------------------------------------------------------
-    # Operation / prompt properties
-    # -------------------------------------------------------------------------
 
     @property
     def operation(self) -> str:
@@ -523,17 +696,12 @@ class Gemma4ImageModel(Gemma4BaseModel):
     @operation.setter
     def operation(self, value: str):
         if value not in IMAGE_OPERATIONS:
-            raise ValueError(
-                f"Invalid image operation: '{value}'. "
-                f"Must be one of {list(IMAGE_OPERATIONS.keys())}"
-            )
+            raise ValueError(f"Invalid: '{value}'. Must be one of {list(IMAGE_OPERATIONS.keys())}")
         self.config.operation = value
 
     @property
     def system_prompt(self) -> str:
-        if self.config.system_prompt is not None:
-            return self.config.system_prompt
-        return IMAGE_OPERATIONS[self.config.operation]
+        return self.config.system_prompt or IMAGE_OPERATIONS[self.config.operation]
 
     @system_prompt.setter
     def system_prompt(self, value: Optional[str]):
@@ -547,240 +715,274 @@ class Gemma4ImageModel(Gemma4BaseModel):
     def prompt(self, value: Optional[str]):
         self.config.prompt = value
 
-    # -------------------------------------------------------------------------
-    # Message building
-    # -------------------------------------------------------------------------
+    # -- Inference -------------------------------------------------------------
 
-    def _build_image_message(self, filepath: str, prompt: str) -> list:
-        """Build the messages list for image inference."""
-        return [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": self.system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "url": filepath},
-                    {"type": "text", "text": prompt},
-                ],
-            },
+    def _run_inference(self, filepath: str, prompt: str):
+        """Run inference on a single image. Returns a FiftyOne Label."""
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": self.system_prompt}]},
+            {"role": "user", "content": [
+                {"type": "image", "url": filepath},
+                {"type": "text", "text": prompt},
+            ]},
         ]
 
-    # -------------------------------------------------------------------------
-    # Inference
-    # -------------------------------------------------------------------------
+        tools = _OPERATION_TOOLS.get(self.config.operation)
+        parsed = self._generate(messages, tools=tools)
 
-    def _run_image_inference(self, messages: list) -> str:
-        """Single-sample image inference.
+        thinking = parsed.get("thinking")
 
-        Uses apply_chat_template for proper message formatting, then
-        model.generate() for output.
+        # 1. Try tool_calls from parse_response (cleanest path)
+        tool_calls = parsed.get("tool_calls")
+        if tool_calls:
+            args = tool_calls[0].get("function", {}).get("arguments", {})
+            if args:
+                return self._structured_to_label(args, thinking)
+
+        # 2. Try content — might contain tool call text or plain text
+        content = parsed.get("content") or ""
+        if content.strip().startswith("call:"):
+            args = self._parse_tool_call_text(content)
+            if args:
+                return self._structured_to_label(args, thinking)
+
+        # 3. Fallback: check raw output for tool call that parse_response
+        #    failed to extract (e.g. malformed JSON in tool call arguments)
+        raw = parsed.get("_raw", "")
+        if raw and "call:" in raw and not content:
+            # Extract tool call text from raw output
+            m = re.search(r"call:\w+(\{.*)", raw, re.DOTALL)
+            if m:
+                args = self._parse_tool_call_text("call:" + m.group(0).split("call:", 1)[-1])
+                if args:
+                    return self._structured_to_label(args, thinking)
+
+        # 4. Text content path (text ops, or final fallback)
+        return self._text_to_label(content, thinking)
+
+    @staticmethod
+    def _parse_tool_call_text(text: str) -> Optional[dict]:
+        """Parse a tool call from plain text like 'call:func_name{...}'.
+
+        The model sometimes outputs tool calls as content text rather than
+        using the special token format that parse_response expects.
+        Handles unquoted keys/values and common format variations.
         """
-        if self._model is None:
-            self._load_model()
+        m = re.match(r"call:\w+(\{.*)", text.strip(), re.DOTALL)
+        if not m:
+            return None
 
-        device = next(self._model.parameters()).device
+        raw_json = m.group(1)
 
-        chat_kwargs = {}
-        if self.config.enable_thinking:
-            chat_kwargs["enable_thinking"] = True
-
-        inputs = self._processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-            **chat_kwargs,
-        ).to(device)
-
-        input_len = inputs["input_ids"].shape[-1]
-
-        gen_kwargs: dict = {
-            "max_new_tokens": self.config.max_new_tokens,
-            "do_sample": self.config.do_sample,
-            "repetition_penalty": self.config.repetition_penalty,
-        }
-        if self.config.do_sample:
-            gen_kwargs.update({
-                "temperature": self.config.temperature,
-                "top_p": self.config.top_p,
-                "top_k": self.config.top_k,
-            })
-
-        with torch.no_grad():
-            output_ids = self._model.generate(**inputs, **gen_kwargs)
-
-        generated_ids = output_ids[0][input_len:]
-
-        # Use parse_response if available (Gemma4-specific)
-        if hasattr(self._processor, "parse_response"):
-            raw = self._processor.decode(
-                generated_ids, skip_special_tokens=False
-            )
-            try:
-                return self._processor.parse_response(raw)
-            except Exception:
-                pass
-
-        return self._processor.decode(
-            generated_ids, skip_special_tokens=True
+        # Fix common model output issues:
+        # 1. bbox_bbox → box_2d (common typo from model)
+        fixed = raw_json.replace("bbox_bbox", "box_2d")
+        fixed = fixed.replace("bbox_2d", "box_2d")
+        # 2. Set-literal bbox {40,10,680,990} → array [40,10,680,990]
+        fixed = re.sub(
+            r'(box_2d|"box_2d")\s*:\s*\{(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\}',
+            r'\1: [\2, \3, \4, \5]',
+            fixed,
+        )
+        # 3. Add quotes around unquoted keys: {key: → {"key":
+        fixed = re.sub(r'([{,]\s*)(\w+)\s*:', r'\1"\2":', fixed)
+        # 4. Add quotes around unquoted string values (not numbers)
+        fixed = re.sub(
+            r':\s*([a-zA-Z][a-zA-Z0-9_ ]*?)([,}\]])',
+            r': "\1"\2',
+            fixed,
         )
 
-    # -------------------------------------------------------------------------
-    # Output parsing - dispatcher
-    # -------------------------------------------------------------------------
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            logger.debug("Failed to parse tool call text: %s", fixed[:500])
+            return None
 
-    def _parse_image_output(
-        self, text: str, filepath: str, sample
-    ) -> dict:
-        """Extract reasoning then dispatch to the appropriate converter.
+    def _structured_to_label(self, args: dict, thinking):
+        """Convert tool call arguments to a FiftyOne Label."""
+        op = self.config.operation
+        if op == "detect":
+            return self._to_detections(args.get("detections", []), thinking)
+        if op == "point":
+            return self._to_keypoints(args.get("points", []), thinking)
+        if op == "classify":
+            return self._to_classifications(args.get("labels", []), thinking)
+        return fo.Classification(label=str(args))
 
-        Returns a dict so FiftyOne stores each key as a separate field
-        prefixed by label_field.
-        """
-        reasoning, prediction = self._extract_reasoning(text)
+    def _text_to_label(self, text: str, thinking):
+        """Convert plain text content to a FiftyOne Label."""
+        op = self.config.operation
+        if op in ("vqa", "caption", "ocr"):
+            label = fo.Classification(label=text.strip())
+            if thinking:
+                label["reasoning"] = thinking
+            return label
 
-        if self.config.operation == "vqa":
-            result = {"response": prediction.strip()}
-            if reasoning is not None:
-                result["reasoning"] = reasoning
-            return result
+        # Structured op that didn't produce a tool call — try JSON extraction
+        data = self._extract_json(text)
+        if not data:
+            logger.warning("No structured output for %s. Content: %s", op, text[:500])
 
-        if self.config.operation in ("caption", "ocr"):
-            result = {"response": prediction.strip()}
-            if reasoning is not None:
-                result["reasoning"] = reasoning
-            return result
+        if op == "detect":
+            return self._to_detections(data, thinking)
+        if op == "point":
+            return self._to_keypoints(data, thinking)
+        if op == "classify":
+            return self._to_classifications(data, thinking)
+        return fo.Classification(label=text.strip())
 
-        if self.config.operation == "detect":
-            label = self._to_detections(
-                self._extract_json(prediction), reasoning
-            )
-            return {"detections": label, "raw": text}
+    # -- Output converters -----------------------------------------------------
 
-        if self.config.operation == "point":
-            label = self._to_keypoints(
-                self._extract_json(prediction), reasoning
-            )
-            return {"keypoints": label, "raw": text}
+    def _to_detections(self, boxes, reasoning=None) -> fo.Detections:
+        """Convert model detection output to fo.Detections.
 
-        if self.config.operation == "classify":
-            label = self._to_classifications(
-                self._extract_json(prediction), reasoning
-            )
-            return {"classifications": label, "raw": text}
-
-        logger.warning(f"Unknown operation: {self.config.operation}")
-        return {"raw": text}
-
-    # -------------------------------------------------------------------------
-    # Output converters
-    # -------------------------------------------------------------------------
-
-    def _to_detections(
-        self, boxes, reasoning: Optional[str] = None
-    ) -> fo.Detections:
-        """Convert model bbox_2d output to fo.Detections.
-
-        Coordinates are in 0-1000 scale, normalized to [0,1].
+        Gemma4 native format: {"box_2d": [y1, x1, y2, x2], "label": "..."}
+        Coordinates are in 0-1000 scale, converted to FiftyOne's [x, y, w, h]
+        in [0, 1] range.
         """
         if not boxes:
             return fo.Detections(detections=[])
 
+        # Unwrap nested lists [[{...}]] → [{...}]
+        if isinstance(boxes, list) and boxes and isinstance(boxes[0], list):
+            boxes = boxes[0]
+
+        # Unwrap wrapper dicts {"detections": [...]}
         if isinstance(boxes, dict):
-            boxes = [boxes]
+            if "box_2d" in boxes or "bbox_2d" in boxes or "bbox" in boxes:
+                boxes = [boxes]
+            else:
+                for v in boxes.values():
+                    if isinstance(v, list):
+                        boxes = v
+                        break
+                else:
+                    boxes = [boxes]
         elif not isinstance(boxes, list):
             return fo.Detections(detections=[])
 
-        detections = []
+        dets = []
         for box in boxes:
             try:
                 if isinstance(box, dict):
-                    bbox = box.get("bbox_2d", box.get("bbox"))
-                    label = str(box.get("label", "object"))
-                elif isinstance(box, list) and len(box) == 4:
-                    bbox = box
-                    label = "object"
+                    # Try native key first, then fallbacks
+                    bbox = (
+                        box.get("box_2d")       # Gemma4 native
+                        or box.get("bbox_2d")    # our old schema
+                        or box.get("bbox_bbox")  # model typo
+                        or box.get("bbox")
+                        or box.get("bounding_box")
+                        or box.get("box")
+                    )
+                    label = str(box.get("label", box.get("name", "object")))
+                elif isinstance(box, list) and len(box) >= 4:
+                    bbox, label = box, "object"
                 else:
                     continue
 
-                if not bbox or len(bbox) < 4:
+                if not bbox:
                     continue
 
-                x1, y1, x2, y2 = (float(v) for v in bbox[:4])
-                det = fo.Detection(
-                    label=label,
-                    bounding_box=[
-                        x1 / 1000,
-                        y1 / 1000,
-                        (x2 - x1) / 1000,
-                        (y2 - y1) / 1000,
-                    ],
-                )
-                if reasoning is not None:
+                # Handle bbox as dict {xmin:, ymin:, xmax:, ymax:}
+                if isinstance(bbox, dict):
+                    x1 = float(bbox.get("xmin", bbox.get("x1", 0)))
+                    y1 = float(bbox.get("ymin", bbox.get("y1", 0)))
+                    x2 = float(bbox.get("xmax", bbox.get("x2", 0)))
+                    y2 = float(bbox.get("ymax", bbox.get("y2", 0)))
+                elif isinstance(bbox, list) and len(bbox) >= 4:
+                    # Gemma4 native order: [y1, x1, y2, x2]
+                    y1, x1, y2, x2 = (float(v) for v in bbox[:4])
+                else:
+                    continue
+
+                # Normalize to [0, 1]
+                mx = max(abs(x1), abs(y1), abs(x2), abs(y2))
+                if mx > 1.0:
+                    s = 1000.0 if mx <= 1000 else mx
+                    x1, y1, x2, y2 = x1 / s, y1 / s, x2 / s, y2 / s
+
+                w, h = x2 - x1, y2 - y1
+                if w <= 0 or h <= 0:
+                    continue
+
+                det = fo.Detection(label=label, bounding_box=[x1, y1, w, h])
+                if reasoning:
                     det["reasoning"] = reasoning
-                detections.append(det)
+                dets.append(det)
             except Exception as e:
                 logger.debug(f"Error processing box {box}: {e}")
 
-        return fo.Detections(detections=detections)
+        return fo.Detections(detections=dets)
 
-    def _to_keypoints(
-        self, points, reasoning: Optional[str] = None
-    ) -> fo.Keypoints:
-        """Convert model point output to fo.Keypoints.
-
-        Coordinates in 0-1000 scale, normalized to [0,1].
-        """
-        if not points and points != 0:
+    def _to_keypoints(self, points, reasoning=None) -> fo.Keypoints:
+        if not points:
             return fo.Keypoints(keypoints=[])
+
+        if isinstance(points, dict):
+            for v in points.values():
+                if isinstance(v, list):
+                    points = v
+                    break
+            else:
+                return fo.Keypoints(keypoints=[])
 
         if not isinstance(points, list):
             return fo.Keypoints(keypoints=[])
 
-        # Detect single [x, y] pair
         if len(points) == 2 and all(isinstance(v, (int, float)) for v in points):
             points = [points]
 
-        keypoints = []
+        kps = []
         for pt in points:
             try:
                 if isinstance(pt, list) and len(pt) == 2:
-                    x, y = float(pt[0]), float(pt[1])
-                    label = "point"
+                    # Gemma4 native: [y, x]
+                    y_val, x_val = float(pt[0]), float(pt[1])
+                    x, y, label = x_val, y_val, "point"
                 elif isinstance(pt, dict):
-                    coords = pt.get("point_2d", pt.get("point"))
+                    coords = pt.get("point_2d") or pt.get("point")
                     if not coords or len(coords) < 2:
                         continue
-                    x, y = float(coords[0]), float(coords[1])
+                    # Gemma4 native: [y, x]
+                    y_val, x_val = float(coords[0]), float(coords[1])
+                    x, y = x_val, y_val
                     label = str(pt.get("label", "point"))
                 else:
                     continue
 
-                kp = fo.Keypoint(label=label, points=[[x / 1000, y / 1000]])
-                if reasoning is not None:
+                mx = max(abs(x), abs(y))
+                if mx > 1.0:
+                    s = 1000.0 if mx <= 1000 else mx
+                    x, y = x / s, y / s
+
+                kp = fo.Keypoint(label=label, points=[[x, y]])
+                if reasoning:
                     kp["reasoning"] = reasoning
-                keypoints.append(kp)
+                kps.append(kp)
             except Exception as e:
                 logger.debug(f"Error processing point {pt}: {e}")
 
-        return fo.Keypoints(keypoints=keypoints)
+        return fo.Keypoints(keypoints=kps)
 
-    def _to_classifications(
-        self, classes, reasoning: Optional[str] = None
-    ) -> fo.Classifications:
-        """Convert model classification output to fo.Classifications."""
+    def _to_classifications(self, classes, reasoning=None) -> fo.Classifications:
         if not classes:
             return fo.Classifications(classifications=[])
 
         if isinstance(classes, dict):
-            classes = [classes]
+            if "label" in classes:
+                classes = [classes]
+            else:
+                for v in classes.values():
+                    if isinstance(v, list):
+                        classes = v
+                        break
+                else:
+                    classes = [classes]
         elif not isinstance(classes, list):
             return fo.Classifications(classifications=[])
 
-        classifications = []
+        cls_list = []
         for cls in classes:
             try:
                 if isinstance(cls, dict):
@@ -789,156 +991,82 @@ class Gemma4ImageModel(Gemma4BaseModel):
                     label = cls
                 else:
                     continue
-
                 if not label:
                     continue
-
                 c = fo.Classification(label=label)
-                if reasoning is not None:
+                if reasoning:
                     c["reasoning"] = reasoning
-                classifications.append(c)
+                cls_list.append(c)
             except Exception as e:
                 logger.debug(f"Error processing classification {cls}: {e}")
 
-        return fo.Classifications(classifications=classifications)
+        return fo.Classifications(classifications=cls_list)
 
-    # -------------------------------------------------------------------------
-    # predict / predict_all
-    # -------------------------------------------------------------------------
+    # -- predict / predict_all -------------------------------------------------
 
     def predict(self, arg, sample=None):
-        """Single-sample inference."""
         if isinstance(arg, dict):
-            batch_item = arg
+            item = arg
         else:
-            if isinstance(arg, str):
-                filepath = arg
-            elif hasattr(arg, "inpath"):
-                filepath = arg.inpath
-            elif hasattr(arg, "path"):
-                filepath = arg.path
-            else:
-                filepath = str(arg)
-
+            fp = arg if isinstance(arg, str) else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
             prompt = None
-            if sample is not None and "prompt_field" in self._fields:
-                field_name = self._fields["prompt_field"]
-                if sample.has_field(field_name):
-                    prompt = sample.get_field(field_name)
+            if sample and "prompt_field" in self._fields:
+                fn = self._fields["prompt_field"]
+                if sample.has_field(fn):
+                    prompt = sample.get_field(fn)
+            item = {"filepath": fp, "prompt": prompt, "metadata": None}
 
-            batch_item = {
-                "filepath": filepath,
-                "prompt": prompt,
-                "metadata": None,
-            }
-
-        results = self.predict_all(
-            [batch_item], samples=[sample] if sample else None
-        )
-        return results[0]
+        return self.predict_all([item], samples=[sample] if sample else None)[0]
 
     def predict_all(self, batch: list, samples=None) -> list:
-        """Batch image inference (processes samples sequentially).
-
-        Args:
-            batch:   List of dicts with "filepath" and "prompt" keys
-            samples: Optional list of FiftyOne samples
-
-        Returns:
-            List of FiftyOne labels, one per sample
-        """
         if not batch:
             return []
-
         if self._model is None:
             self._load_model()
 
         results = []
-        for i, item in enumerate(batch):
+        for item in batch:
             prompt = item.get("prompt") or self.config.prompt
             if not prompt:
                 raise ValueError(
-                    f"No prompt provided for image operation "
-                    f"'{self.config.operation}'. "
-                    "Set model.prompt or pass prompt_field to apply_model()."
+                    f"No prompt for '{self.config.operation}'. "
+                    "Set model.prompt or pass prompt_field."
                 )
-
-            messages = self._build_image_message(item["filepath"], prompt)
-            output_text = self._run_image_inference(messages)
-            sample = samples[i] if samples else None
-            label = self._parse_image_output(
-                output_text, item["filepath"], sample
-            )
-            results.append(label)
-
+            results.append(self._run_inference(item["filepath"], prompt))
         return results
 
 
 # =============================================================================
-# Video config
+# Video config & model
 # =============================================================================
 
 class Gemma4VideoModelConfig(Gemma4BaseConfig):
-    """Configuration for the Gemma 4 video model."""
-
     def __init__(self, d: dict):
         super().__init__(d)
-
-        self.operation = self.parse_string(
-            d, "operation", default="description"
-        )
+        self.operation = self.parse_string(d, "operation", default="description")
         if self.operation not in VIDEO_OPERATIONS:
             raise ValueError(
                 f"Invalid video operation: '{self.operation}'. "
                 f"Must be one of {list(VIDEO_OPERATIONS.keys())}"
             )
-
         self.custom_prompt = self.parse_string(d, "custom_prompt", default=None)
-
         if self.operation == "custom" and self.custom_prompt is None:
-            raise ValueError(
-                "custom_prompt is required when operation='custom'"
-            )
+            raise ValueError("custom_prompt required when operation='custom'")
         if self.operation != "custom" and self.custom_prompt is not None:
-            raise ValueError(
-                "custom_prompt is only allowed when operation='custom'"
-            )
-
+            raise ValueError("custom_prompt only allowed when operation='custom'")
         if self.model_path not in _VIDEO_CAPABLE_MODELS:
             raise ValueError(
-                f"Model '{self.model_path}' does not support video. "
+                f"'{self.model_path}' doesn't support video. "
                 f"Use one of: {sorted(_VIDEO_CAPABLE_MODELS)}"
             )
 
 
-# =============================================================================
-# Video model
-# =============================================================================
-
 class Gemma4VideoModel(Gemma4BaseModel):
-    """FiftyOne zoo model for Gemma 4 video understanding.
-
-    Operations:
-        description          - str (in "summary" field)
-        temporal_localization - fo.TemporalDetections (in "events" field)
-        tracking             - frame-level fo.Detections (in "objects" field)
-        ocr                  - frame-level fo.Detections (in "text_content" field)
-        comprehensive        - mixed sample-level and frame-level labels
-        custom               - str (in "result" field)
-
-    Requires dataset.compute_metadata() for temporal_localization, tracking,
-    ocr, and comprehensive operations.
-
-    Only E2B and E4B models support video.
-    """
+    """FiftyOne zoo model for Gemma 4 video understanding."""
 
     @property
     def media_type(self) -> str:
         return "video"
-
-    # -------------------------------------------------------------------------
-    # Operation / prompt properties
-    # -------------------------------------------------------------------------
 
     @property
     def operation(self) -> str:
@@ -947,10 +1075,7 @@ class Gemma4VideoModel(Gemma4BaseModel):
     @operation.setter
     def operation(self, value: str):
         if value not in VIDEO_OPERATIONS:
-            raise ValueError(
-                f"Invalid video operation: '{value}'. "
-                f"Must be one of {list(VIDEO_OPERATIONS.keys())}"
-            )
+            raise ValueError(f"Invalid: '{value}'. Must be one of {list(VIDEO_OPERATIONS.keys())}")
         self.config.operation = value
 
     @property
@@ -962,539 +1087,190 @@ class Gemma4VideoModel(Gemma4BaseModel):
     @prompt.setter
     def prompt(self, value: str):
         if self.config.operation != "custom":
-            raise ValueError(
-                "Cannot set prompt directly for predefined operations. "
-                "Use operation='custom' and set custom_prompt."
-            )
+            raise ValueError("Use operation='custom' to set prompt directly.")
         self.config.custom_prompt = value
 
     @property
     def custom_prompt(self) -> Optional[str]:
-        if self.config.operation != "custom":
-            raise ValueError(
-                "custom_prompt is only accessible when operation='custom'"
-            )
-        return self.config.custom_prompt
+        return self.config.custom_prompt if self.config.operation == "custom" else None
 
     @custom_prompt.setter
     def custom_prompt(self, value: str):
         if self.config.operation != "custom":
-            raise ValueError(
-                "custom_prompt is only allowed when operation='custom'"
-            )
+            raise ValueError("custom_prompt only allowed when operation='custom'")
         self.config.custom_prompt = value
 
-    # -------------------------------------------------------------------------
-    # Message building
-    # -------------------------------------------------------------------------
+    # -- Inference -------------------------------------------------------------
 
-    def _build_video_message(self, filepath: str, prompt: str) -> list:
-        """Build messages list for video inference.
-
-        Uses Gemma4's native video support via {"type": "video"} content.
-        """
-        return [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "video", "video": filepath},
-                    {"type": "text", "text": prompt},
-                ],
-            }
+    def _run_inference(self, filepath: str, prompt: str) -> str:
+        """Run video inference. Returns content text from parse_response."""
+        messages = [
+            {"role": "user", "content": [
+                {"type": "video", "video": filepath},
+                {"type": "text", "text": prompt},
+            ]},
         ]
+        parsed = self._generate(messages)
+        return parsed.get("content") or ""
 
-    # -------------------------------------------------------------------------
-    # Inference
-    # -------------------------------------------------------------------------
-
-    def _run_video_inference(self, messages: list) -> Tuple[str, dict]:
-        """Run video inference using Gemma4's native video handling.
-
-        Returns:
-            (output_text, video_metadata)
-        """
-        if self._model is None:
-            self._load_model()
-
-        device = next(self._model.parameters()).device
-
-        chat_kwargs = {}
-        if self.config.enable_thinking:
-            chat_kwargs["enable_thinking"] = True
-
-        inputs = self._processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-            **chat_kwargs,
-        ).to(device)
-
-        input_len = inputs["input_ids"].shape[-1]
-
-        gen_kwargs: dict = {
-            "max_new_tokens": self.config.max_new_tokens,
-            "do_sample": self.config.do_sample,
-            "repetition_penalty": self.config.repetition_penalty,
-        }
-        if self.config.do_sample:
-            gen_kwargs.update({
-                "temperature": self.config.temperature,
-                "top_p": self.config.top_p,
-                "top_k": self.config.top_k,
-            })
-
-        with torch.no_grad():
-            output_ids = self._model.generate(**inputs, **gen_kwargs)
-
-        generated_ids = output_ids[0][input_len:]
-
-        if hasattr(self._processor, "parse_response"):
-            raw = self._processor.decode(
-                generated_ids, skip_special_tokens=False
-            )
-            try:
-                return self._processor.parse_response(raw), {}
-            except Exception:
-                pass
-
-        return self._processor.decode(
-            generated_ids, skip_special_tokens=True
-        ), {}
-
-    # -------------------------------------------------------------------------
-    # Output parsing - dispatcher
-    # -------------------------------------------------------------------------
-
-    def _parse_video_output(
-        self, output_text: str, sample, video_metadata: Optional[dict] = None
-    ) -> dict:
-        """Parse model output into FiftyOne labels based on current operation."""
+    def _parse_output(self, text: str, sample) -> dict:
+        """Parse video text output into FiftyOne labels."""
         if self.config.operation == "description":
-            return {"summary": output_text}
-
+            return {"summary": text}
         if self.config.operation == "custom":
-            return {"result": output_text}
+            return {"result": text}
 
-        json_data = self._extract_json(output_text)
+        data = self._extract_json(text)
 
         if self.config.operation == "temporal_localization":
-            return self._parse_temporal_only(json_data, sample)
-
+            return self._parse_temporal_only(data, sample)
         if self.config.operation == "tracking":
-            return self._parse_tracking_only(
-                json_data, sample, video_metadata
-            )
-
+            return self._parse_tracking_only(data, sample)
         if self.config.operation == "ocr":
-            return self._parse_ocr_only(json_data, sample, video_metadata)
-
+            return self._parse_ocr_only(data, sample)
         if self.config.operation == "comprehensive":
-            return self._parse_comprehensive(
-                json_data, sample, video_metadata
-            )
+            return self._parse_comprehensive(data, sample)
 
-        logger.warning(f"Unknown video operation: {self.config.operation}")
-        return {"summary": output_text}
+        return {"summary": text}
 
-    # -------------------------------------------------------------------------
-    # Operation-specific parsers
-    # -------------------------------------------------------------------------
+    # -- Video parsers ---------------------------------------------------------
 
-    def _parse_temporal_only(self, json_data, sample) -> dict:
-        if isinstance(json_data, list):
-            items = json_data or []
-        elif isinstance(json_data, dict) and "events" in json_data:
-            items = json_data["events"] or []
-        else:
-            if json_data:
-                logger.warning(
-                    "Expected list or dict with 'events' for "
-                    "temporal_localization"
-                )
-            items = []
-
+    def _parse_temporal_only(self, data, sample) -> dict:
+        items = data if isinstance(data, list) else (data or {}).get("events", []) or []
         if not items:
             return {"events": fol.TemporalDetections(detections=[])}
+        dets = self._parse_temporal_detections(items, sample, "events")
+        return {"events": dets or fol.TemporalDetections(detections=[])}
 
-        detections = self._parse_temporal_detections(items, sample, "events")
-        return {
-            "events": detections or fol.TemporalDetections(detections=[])
-        }
-
-    def _parse_tracking_only(
-        self, json_data, sample, video_metadata=None
-    ) -> dict:
-        if isinstance(json_data, list):
-            items = json_data or []
-        elif isinstance(json_data, dict) and "objects" in json_data:
-            items = json_data["objects"] or []
-        else:
-            items = []
-
+    def _parse_tracking_only(self, data, sample) -> dict:
+        items = data if isinstance(data, list) else (data or {}).get("objects", []) or []
         if not items:
             return {"objects": fol.Detections(detections=[])}
-
-        frame_detections = self._parse_frame_detections(
-            items, sample, text_key=None, video_metadata=video_metadata
-        )
-        if not frame_detections:
+        fd = self._parse_frame_detections(items, sample)
+        if not fd:
             return {"objects": fol.Detections(detections=[])}
+        return {fn: {"objects": d} for fn, d in fd.items()}
 
-        return {
-            frame_num: {"objects": dets}
-            for frame_num, dets in frame_detections.items()
-        }
-
-    def _parse_ocr_only(self, json_data, sample, video_metadata=None) -> dict:
-        if isinstance(json_data, list):
-            items = json_data or []
-        elif isinstance(json_data, dict) and "text_content" in json_data:
-            items = json_data["text_content"] or []
-        else:
-            items = []
-
+    def _parse_ocr_only(self, data, sample) -> dict:
+        items = data if isinstance(data, list) else (data or {}).get("text_content", []) or []
         if not items:
             return {"text_content": fol.Detections(detections=[])}
-
-        frame_detections = self._parse_frame_detections(
-            items, sample, text_key="text", video_metadata=video_metadata
-        )
-        if not frame_detections:
+        fd = self._parse_frame_detections(items, sample, text_key="text")
+        if not fd:
             return {"text_content": fol.Detections(detections=[])}
+        return {fn: {"text_content": d} for fn, d in fd.items()}
 
-        return {
-            frame_num: {"text_content": dets}
-            for frame_num, dets in frame_detections.items()
-        }
-
-    def _parse_comprehensive(
-        self, json_data, sample, video_metadata=None
-    ) -> dict:
-        if not json_data:
-            return {"summary": "No structured output from model"}
-
-        if isinstance(json_data, list):
-            logger.warning("Expected dict for comprehensive, got list")
-            return {
-                "summary": "Invalid output format: received list instead of dict"
-            }
-
-        labels: dict = {}
-        for key, value in json_data.items():
-            if isinstance(value, str):
-                labels[key] = value
-            elif isinstance(value, dict) and self._is_simple_dict(value):
-                self._parse_dict_value(key, value, labels)
-            elif isinstance(value, list) and value:
-                self._parse_list_value(
-                    key, value, labels, sample, video_metadata
-                )
-
+    def _parse_comprehensive(self, data, sample) -> dict:
+        if not data or not isinstance(data, dict):
+            return {"summary": str(data) if data else "No output"}
+        labels = {}
+        for k, v in data.items():
+            if isinstance(v, str):
+                labels[k] = v
+            elif isinstance(v, dict) and all(isinstance(x, (str, int, float, bool)) for x in v.values()):
+                for sk, sv in v.items():
+                    labels[f"{k}_{sk}"] = fol.Classification(label=str(sv).capitalize())
+            elif isinstance(v, list) and v and isinstance(v[0], dict):
+                first = v[0]
+                if all(x in first for x in ["start", "end", "description"]):
+                    d = self._parse_temporal_detections(v, sample, "events")
+                    if d:
+                        labels[k] = d
+                elif all(x in first for x in ["time", "bbox_2d"]):
+                    fd = self._parse_frame_detections(v, sample, text_key="text" if "text" in first else None)
+                    for fn, d in fd.items():
+                        labels.setdefault(fn, {})[k] = d
         return labels
 
-    # -------------------------------------------------------------------------
-    # Label builders
-    # -------------------------------------------------------------------------
-
-    def _is_simple_dict(self, value: dict) -> bool:
-        return all(
-            isinstance(v, (str, int, float, bool)) for v in value.values()
-        )
-
-    def _parse_dict_value(self, key: str, value: dict, labels: dict):
-        for subkey, subvalue in value.items():
-            field_name = f"{key}_{subkey}"
-            if subkey.endswith("activities"):
-                if isinstance(subvalue, str):
-                    items = [
-                        s.strip().capitalize()
-                        for s in subvalue.split(",")
-                        if s.strip()
-                    ]
-                    labels[field_name] = fol.Classifications(
-                        classifications=[
-                            fol.Classification(label=i) for i in items
-                        ]
-                    )
-                else:
-                    labels[field_name] = fol.Classifications(
-                        classifications=[
-                            fol.Classification(
-                                label=str(subvalue).capitalize()
-                            )
-                        ]
-                    )
-            else:
-                labels[field_name] = fol.Classification(
-                    label=str(subvalue).capitalize()
-                )
-
-    def _parse_list_value(
-        self, key, value, labels, sample, video_metadata=None
-    ):
-        first = value[0]
-        patterns = [
-            (
-                ["start", "end", "description"],
-                self._parse_temporal_detections,
-                "events",
-            ),
-            (
-                ["name", "first_appears", "last_appears"],
-                self._parse_temporal_detections,
-                "objects",
-            ),
-            (
-                ["start", "end", "text"],
-                self._parse_temporal_detections,
-                "text",
-            ),
-            (
-                ["time", "bbox_2d", "label"],
-                self._parse_frame_detections,
-                None,
-            ),
-            (
-                ["time", "text", "bbox_2d"],
-                self._parse_frame_detections,
-                "text",
-            ),
-        ]
-
-        for required_keys, parser, label_type in patterns:
-            if all(k in first for k in required_keys):
-                if parser == self._parse_frame_detections:
-                    frame_labels = parser(
-                        value, sample, label_type,
-                        video_metadata=video_metadata,
-                    )
-                    self._merge_frame_labels(labels, frame_labels, key)
-                else:
-                    detections = parser(value, sample, label_type)
-                    if detections:
-                        labels[key] = detections
-                return
-
-    def _parse_temporal_detections(
-        self, items: list, sample, label_type: str
-    ) -> Optional[fol.TemporalDetections]:
-        detections = []
+    def _parse_temporal_detections(self, items, sample, label_type):
+        dets = []
         for item in items:
             if not isinstance(item, dict):
                 continue
-
             if label_type == "events":
-                start = item.get("start", "00:00.00")
-                end = item.get("end", "00:00.00")
+                start, end = item.get("start", "00:00.00"), item.get("end", "00:00.00")
                 label = str(item.get("description", "event")).capitalize()
             elif label_type == "objects":
-                start = item.get("first_appears", "00:00.00")
-                end = item.get("last_appears", "00:00.00")
+                start, end = item.get("first_appears", "00:00.00"), item.get("last_appears", "00:00.00")
                 label = str(item.get("name", "object")).capitalize()
-            else:  # text
-                start = item.get("start", "00:00.00")
-                end = item.get("end", "00:00.00")
+            else:
+                start, end = item.get("start", "00:00.00"), item.get("end", "00:00.00")
                 label = str(item.get("text", "text")).capitalize()
+            s_sec = self._ts(start)
+            e_sec = self._ts(end)
+            dets.append(fol.TemporalDetection.from_timestamps([s_sec, e_sec], label=label, sample=sample))
+        return fol.TemporalDetections(detections=dets) if dets else None
 
-            start_sec = self._timestamp_to_seconds(start)
-            end_sec = self._timestamp_to_seconds(end)
-
-            detection = fol.TemporalDetection.from_timestamps(
-                [start_sec, end_sec], label=label, sample=sample
-            )
-            detections.append(detection)
-
-        return (
-            fol.TemporalDetections(detections=detections)
-            if detections
-            else None
-        )
-
-    def _parse_frame_detections(
-        self,
-        items: list,
-        sample,
-        text_key: Optional[str] = None,
-        video_metadata: Optional[dict] = None,
-    ) -> dict:
-        fps = self._get_video_fps(sample, video_metadata)
-        frame_detections: dict = {}
-
+    def _parse_frame_detections(self, items, sample, text_key=None):
+        fps = self._get_fps(sample)
+        frames = {}
         for item in items:
             if not isinstance(item, dict):
                 continue
-
-            frame_num = (
-                int(
-                    self._timestamp_to_seconds(item.get("time", "00:00.00"))
-                    * fps
-                )
-                + 1
-            )
-
+            fn = int(self._ts(item.get("time", "00:00.00")) * fps) + 1
             bbox = item.get("bbox_2d", [0, 0, 0, 0])
             if len(bbox) < 4:
                 continue
-
             x1, y1, x2, y2 = [max(0, min(1000, c)) for c in bbox[:4]]
             if x2 <= x1 or y2 <= y1:
                 continue
-
-            x = x1 / 1000
-            y = y1 / 1000
-            w = (x2 - x1) / 1000
-            h = (y2 - y1) / 1000
             label = item.get("text" if text_key else "label", "")
-            detection = fol.Detection(
-                label=label, bounding_box=[x, y, w, h]
-            )
-
+            det = fol.Detection(label=label, bounding_box=[x1/1000, y1/1000, (x2-x1)/1000, (y2-y1)/1000])
             if text_key:
-                detection[text_key] = item.get(text_key, "")
+                det[text_key] = item.get(text_key, "")
+            frames.setdefault(fn, fol.Detections(detections=[])).detections.append(det)
+        return frames
 
-            if frame_num not in frame_detections:
-                frame_detections[frame_num] = fol.Detections(detections=[])
-            frame_detections[frame_num].detections.append(detection)
+    @staticmethod
+    def _ts(t: str) -> float:
+        m = re.match(r"(\d+):(\d+)\.(\d+)", str(t))
+        return (int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 100.0) if m else 0.0
 
-        return frame_detections
-
-    def _merge_frame_labels(
-        self, labels: dict, frame_detections: dict, key: str
-    ):
-        for frame_num, dets in frame_detections.items():
-            if frame_num not in labels:
-                labels[frame_num] = {}
-            labels[frame_num][key] = dets
-
-    # -------------------------------------------------------------------------
-    # Utilities
-    # -------------------------------------------------------------------------
-
-    def _timestamp_to_seconds(self, timestamp_str: str) -> float:
-        """Convert 'mm:ss.ff' timestamp to total seconds."""
-        match = re.match(r"(\d+):(\d+)\.(\d+)", str(timestamp_str))
-        if not match:
-            return 0.0
-        minutes = int(match.group(1))
-        seconds = int(match.group(2))
-        centiseconds = int(match.group(3))
-        return minutes * 60 + seconds + centiseconds / 100.0
-
-    def _get_video_fps(
-        self, sample, video_metadata: Optional[dict] = None
-    ) -> float:
-        """Get video FPS with fallback chain.
-
-        Priority:
-            1. video_metadata from processor
-            2. sample.metadata.frame_rate
-            3. Default 30.0
-        """
-        if video_metadata and "fps" in video_metadata:
-            return video_metadata["fps"]
-
-        if sample is not None:
+    @staticmethod
+    def _get_fps(sample) -> float:
+        if sample:
             meta = getattr(sample, "metadata", None)
-            if meta is not None and hasattr(meta, "frame_rate"):
+            if meta and hasattr(meta, "frame_rate"):
                 return meta.frame_rate
-
         return 30.0
 
-    def _extract_video_path(self, video) -> str:
-        if isinstance(video, str):
-            return video
-        if hasattr(video, "inpath"):
-            return video.inpath
-        if hasattr(video, "path"):
-            return video.path
-        if hasattr(video, "filepath"):
-            return video.filepath
-        raise TypeError(f"Unsupported video type: {type(video)}")
-
-    # -------------------------------------------------------------------------
-    # predict / predict_all
-    # -------------------------------------------------------------------------
+    # -- predict / predict_all -------------------------------------------------
 
     def predict(self, arg, sample=None):
-        """Single-video inference."""
         if isinstance(arg, dict):
-            batch_item = arg
+            item = arg
         else:
-            filepath = self._extract_video_path(arg)
-
+            fp = arg if isinstance(arg, str) else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
             prompt = None
-            if sample is not None and "prompt_field" in self._fields:
-                field_name = self._fields["prompt_field"]
-                if sample.has_field(field_name):
-                    prompt = sample.get_field(field_name)
-
-            metadata = (
-                getattr(sample, "metadata", None) if sample else None
-            )
-            batch_item = {
-                "filepath": filepath,
-                "prompt": prompt,
-                "metadata": metadata,
-            }
-
-        results = self.predict_all(
-            [batch_item], samples=[sample] if sample else None
-        )
-        return results[0]
+            if sample and "prompt_field" in self._fields:
+                fn = self._fields["prompt_field"]
+                if sample.has_field(fn):
+                    prompt = sample.get_field(fn)
+            item = {"filepath": fp, "prompt": prompt, "metadata": getattr(sample, "metadata", None) if sample else None}
+        return self.predict_all([item], samples=[sample] if sample else None)[0]
 
     def predict_all(self, batch: list, samples=None) -> list:
-        """Batch video inference (sequential per video).
-
-        Args:
-            batch:   List of dicts with "filepath", "prompt", "metadata" keys
-            samples: Optional list of FiftyOne samples
-
-        Returns:
-            List of label dicts, one per video
-        """
         if not batch:
             return []
-
         if self._model is None:
             self._load_model()
 
         results = []
         for i, item in enumerate(batch):
-            filepath = item["filepath"]
             sample = samples[i] if samples else None
+            needs_meta = self.config.operation in ("comprehensive", "temporal_localization", "tracking", "ocr")
+            if needs_meta and not item.get("metadata"):
+                raise ValueError(f"'{self.config.operation}' requires metadata. Call dataset.compute_metadata().")
 
-            needs_metadata = self.config.operation in (
-                "comprehensive",
-                "temporal_localization",
-                "tracking",
-                "ocr",
-            )
-            metadata_from_batch = item.get("metadata")
-            if needs_metadata and not metadata_from_batch:
-                raise ValueError(
-                    f"Operation '{self.config.operation}' requires sample "
-                    "metadata. Call dataset.compute_metadata() first."
-                )
-
-            prompt_from_batch = item.get("prompt")
-            if (
-                self.config.operation == "custom"
-                and prompt_from_batch is not None
-            ):
-                prompt = prompt_from_batch
+            prompt = item.get("prompt")
+            if self.config.operation == "custom" and prompt:
+                pass  # use per-sample prompt
             else:
                 prompt = self.prompt
 
-            messages = self._build_video_message(filepath, prompt)
-            output_text, video_metadata = self._run_video_inference(messages)
-            labels = self._parse_video_output(
-                output_text, sample, video_metadata
-            )
-
+            text = self._run_inference(item["filepath"], prompt)
+            labels = self._parse_output(text, sample)
             if not any(isinstance(k, int) for k in labels):
-                labels["raw"] = output_text
+                labels["raw"] = text
             results.append(labels)
-
         return results
