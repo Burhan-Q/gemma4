@@ -161,8 +161,7 @@ def resolve_input(model_name: str, ctx):
         required=False,
         label="Prompt",
         description=(
-            "User instruction for image operations "
-            "(detect, point, classify, vqa)"
+            "User instruction for image operations (detect, point, classify, vqa)"
         ),
     )
 
@@ -208,9 +207,7 @@ def resolve_input(model_name: str, ctx):
         "temperature",
         default=1.0,
         label="Temperature",
-        description=(
-            "Sampling temperature (only used when Use Sampling is True)"
-        ),
+        description=("Sampling temperature (only used when Use Sampling is True)"),
     )
 
     inputs.float(
@@ -218,8 +215,7 @@ def resolve_input(model_name: str, ctx):
         default=0.95,
         label="Top-p",
         description=(
-            "Nucleus sampling threshold "
-            "(only used when Use Sampling is True)"
+            "Nucleus sampling threshold (only used when Use Sampling is True)"
         ),
     )
 
@@ -227,10 +223,7 @@ def resolve_input(model_name: str, ctx):
         "top_k",
         default=64,
         label="Top-k",
-        description=(
-            "Top-k sampling parameter "
-            "(only used when Use Sampling is True)"
-        ),
+        description=("Top-k sampling parameter (only used when Use Sampling is True)"),
     )
 
     inputs.float(

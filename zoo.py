@@ -25,7 +25,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -75,9 +75,11 @@ def _setup_logging():
         fname = f"run-{next_num:03d}.log"
         fh = logging.FileHandler(fname, mode="w")
         fh.setLevel(level)
-        fh.setFormatter(logging.Formatter(
-            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        ))
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            )
+        )
         logger.addHandler(fh)
         logger.info("Logging to file: %s", fname)
 
@@ -102,8 +104,7 @@ DEFAULT_DETECT_SYSTEM_PROMPT = (
     "Each object MUST be a separate entry in the detections array — "
     "if you see 5 objects, return 5 entries. "
     "Call the report_detections tool with ALL detections. "
-    "Bounding box format: box_2d as [y1, x1, y2, x2] integers 0-1000."
-    + _TOOL_RULES
+    "Bounding box format: box_2d as [y1, x1, y2, x2] integers 0-1000." + _TOOL_RULES
 )
 
 DEFAULT_POINT_SYSTEM_PROMPT = (
@@ -111,15 +112,13 @@ DEFAULT_POINT_SYSTEM_PROMPT = (
     "Point to the center of EVERY requested object. "
     "Each object MUST be a separate entry in the points array. "
     "Call the report_points tool with ALL points. "
-    "Point format: point_2d as [y, x] integers 0-1000."
-    + _TOOL_RULES
+    "Point format: point_2d as [y, x] integers 0-1000." + _TOOL_RULES
 )
 
 DEFAULT_CLASSIFY_SYSTEM_PROMPT = (
     "You are an image classification assistant. "
     "Return ALL applicable labels. "
-    "Call the report_classifications tool."
-    + _TOOL_RULES
+    "Call the report_classifications tool." + _TOOL_RULES
 )
 
 DEFAULT_VQA_SYSTEM_PROMPT = (
@@ -310,6 +309,7 @@ _VIDEO_CAPABLE_MODELS = {
 # Helpers
 # =============================================================================
 
+
 def get_device() -> str:
     """Return the best available device: cuda > mps > cpu."""
     if torch.cuda.is_available():
@@ -327,6 +327,7 @@ def _identity_collate(batch):
 # =============================================================================
 # Shared GetItem
 # =============================================================================
+
 
 class Gemma4GetItem(GetItem):
     """Extracts filepath, optional per-sample prompt, and metadata."""
@@ -346,6 +347,7 @@ class Gemma4GetItem(GetItem):
 # =============================================================================
 # Base config
 # =============================================================================
+
 
 class Gemma4BaseConfig(fout.TorchImageModelConfig):
     """Shared configuration: model path and text generation parameters."""
@@ -381,9 +383,8 @@ class Gemma4BaseConfig(fout.TorchImageModelConfig):
 # Base model
 # =============================================================================
 
-class Gemma4BaseModel(
-    fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMixin
-):
+
+class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMixin):
     """Shared base for image and video Gemma 4 zoo models."""
 
     def __init__(self, config: Gemma4BaseConfig):
@@ -443,9 +444,7 @@ class Gemma4BaseModel(
         model_kwargs: dict = {"device_map": self.device}
         if self.device == "cuda" and torch.cuda.is_available():
             cap = torch.cuda.get_device_capability(self.device)
-            model_kwargs["torch_dtype"] = (
-                torch.bfloat16 if cap[0] >= 8 else "auto"
-            )
+            model_kwargs["torch_dtype"] = torch.bfloat16 if cap[0] >= 8 else "auto"
         else:
             model_kwargs["torch_dtype"] = "auto"
 
@@ -555,9 +554,7 @@ class Gemma4BaseModel(
             }
 
         # Final fallback: plain decode
-        fallback = self._processor.decode(
-            generated, skip_special_tokens=True
-        )
+        fallback = self._processor.decode(generated, skip_special_tokens=True)
         logger.debug("Fallback plain decode:\n%s", fallback)
         return {"content": fallback}
 
@@ -593,10 +590,12 @@ class Gemma4BaseModel(
 
             args = self._gemma4_to_json(body)
             if args is not None:
-                tool_calls.append({
-                    "type": "function",
-                    "function": {"name": func_name, "arguments": args},
-                })
+                tool_calls.append(
+                    {
+                        "type": "function",
+                        "function": {"name": func_name, "arguments": args},
+                    }
+                )
 
         return tool_calls if tool_calls else None
 
@@ -617,19 +616,17 @@ class Gemma4BaseModel(
             return f"\x00{len(strings) - 1}\x00"
 
         # 1. Capture <|"|> delimited strings and replace with placeholders
-        converted = re.sub(
-            r'<\|"\|>(.*?)<\|"\|>', _capture, text, flags=re.DOTALL
-        )
+        converted = re.sub(r'<\|"\|>(.*?)<\|"\|>', _capture, text, flags=re.DOTALL)
 
         # 2. Fix broken key": patterns where model fuses key with quote.
         #    e.g. {label":"value"} → {label:"value"}
-        converted = re.sub(r'(\w)":', r'\1:', converted)
+        converted = re.sub(r'(\w)":', r"\1:", converted)
 
         # 2b. Fix duplicated/truncated key prefixes
-        converted = re.sub(r'\bbox_box_2d\b', 'box_2d', converted)
-        converted = re.sub(r'\bbox_box\b', 'box_2d', converted)
-        converted = re.sub(r'\bpoint_point_2d\b', 'point_2d', converted)
-        converted = re.sub(r'\bpoint_point\b', 'point_2d', converted)
+        converted = re.sub(r"\bbox_box_2d\b", "box_2d", converted)
+        converted = re.sub(r"\bbox_box\b", "box_2d", converted)
+        converted = re.sub(r"\bpoint_point_2d\b", "point_2d", converted)
+        converted = re.sub(r"\bpoint_point\b", "point_2d", converted)
 
         # 2c. Replace single-quoted strings with placeholders
         converted = re.sub(r"'([^']*)'", _capture, converted)
@@ -648,7 +645,7 @@ class Gemma4BaseModel(
         # 6. Quote remaining bare string values (not numbers, not already quoted)
         # Matches: value that starts with a letter, ends at , } or ]
         converted = re.sub(
-            r':\s*([a-zA-Z][a-zA-Z0-9_ ]*?)(\s*[,}\]])',
+            r":\s*([a-zA-Z][a-zA-Z0-9_ ]*?)(\s*[,}\]])",
             r': "\1"\2',
             converted,
         )
@@ -712,7 +709,7 @@ class Gemma4BaseModel(
         items = []
         i = 0
         while i < len(arr_content):
-            if arr_content[i] == '{':
+            if arr_content[i] == "{":
                 end = cls._depth_scan(arr_content, i, "{", "}")
                 item_str = arr_content[i:end]
                 try:
@@ -929,7 +926,9 @@ class Gemma4ImageModel(Gemma4BaseModel):
     @operation.setter
     def operation(self, value: str):
         if value not in IMAGE_OPERATIONS:
-            raise ValueError(f"Invalid: '{value}'. Must be one of {list(IMAGE_OPERATIONS.keys())}")
+            raise ValueError(
+                f"Invalid: '{value}'. Must be one of {list(IMAGE_OPERATIONS.keys())}"
+            )
         self.config.operation = value
 
     @property
@@ -953,15 +952,23 @@ class Gemma4ImageModel(Gemma4BaseModel):
     def _run_inference(self, filepath: str, prompt: str):
         """Run inference on a single image. Returns a FiftyOne Label."""
         logger.info(
-            "[%s] %s", self.config.operation, os.path.basename(filepath),
+            "[%s] %s",
+            self.config.operation,
+            os.path.basename(filepath),
         )
 
         messages = [
-            {"role": "system", "content": [{"type": "text", "text": self.system_prompt}]},
-            {"role": "user", "content": [
-                {"type": "image", "url": filepath},
-                {"type": "text", "text": prompt},
-            ]},
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": self.system_prompt}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "url": filepath},
+                    {"type": "text", "text": prompt},
+                ],
+            },
         ]
 
         tools = _OPERATION_TOOLS.get(self.config.operation)
@@ -1061,9 +1068,9 @@ class Gemma4ImageModel(Gemma4BaseModel):
                 if isinstance(box, dict):
                     # Try native key first, then fallbacks
                     bbox = (
-                        box.get("box_2d")       # Gemma4 native
-                        or box.get("box_box_2d") # model typo
-                        or box.get("box_box")    # model typo
+                        box.get("box_2d")  # Gemma4 native
+                        or box.get("box_box_2d")  # model typo
+                        or box.get("box_box")  # model typo
                         or box.get("bbox_2d")
                         or box.get("bbox_bbox")  # model typo
                         or box.get("bbox")
@@ -1144,8 +1151,8 @@ class Gemma4ImageModel(Gemma4BaseModel):
                 elif isinstance(pt, dict):
                     coords = (
                         pt.get("point_2d")
-                        or pt.get("point_point")   # model typo
-                        or pt.get("point_point_2d") # model typo
+                        or pt.get("point_point")  # model typo
+                        or pt.get("point_point_2d")  # model typo
                         or pt.get("point")
                     )
                     if not coords or len(coords) < 2:
@@ -1214,7 +1221,11 @@ class Gemma4ImageModel(Gemma4BaseModel):
         if isinstance(arg, dict):
             item = arg
         else:
-            fp = arg if isinstance(arg, str) else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
+            fp = (
+                arg
+                if isinstance(arg, str)
+                else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
+            )
             prompt = None
             if sample and "prompt_field" in self._fields:
                 fn = self._fields["prompt_field"]
@@ -1245,6 +1256,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
 # =============================================================================
 # Video config & model
 # =============================================================================
+
 
 class Gemma4VideoModelConfig(Gemma4BaseConfig):
     def __init__(self, d: dict):
@@ -1281,7 +1293,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
     @operation.setter
     def operation(self, value: str):
         if value not in VIDEO_OPERATIONS:
-            raise ValueError(f"Invalid: '{value}'. Must be one of {list(VIDEO_OPERATIONS.keys())}")
+            raise ValueError(
+                f"Invalid: '{value}'. Must be one of {list(VIDEO_OPERATIONS.keys())}"
+            )
         self.config.operation = value
 
     @property
@@ -1311,13 +1325,18 @@ class Gemma4VideoModel(Gemma4BaseModel):
     def _run_inference(self, filepath: str, prompt: str) -> str:
         """Run video inference. Returns content text from parse_response."""
         logger.info(
-            "[%s] %s", self.config.operation, os.path.basename(filepath),
+            "[%s] %s",
+            self.config.operation,
+            os.path.basename(filepath),
         )
         messages = [
-            {"role": "user", "content": [
-                {"type": "video", "video": filepath},
-                {"type": "text", "text": prompt},
-            ]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video", "video": filepath},
+                    {"type": "text", "text": prompt},
+                ],
+            },
         ]
         parsed = self._generate(messages)
         return parsed.get("content") or ""
@@ -1352,7 +1371,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
         return {"events": dets or fol.TemporalDetections(detections=[])}
 
     def _parse_tracking_only(self, data, sample) -> dict:
-        items = data if isinstance(data, list) else (data or {}).get("objects", []) or []
+        items = (
+            data if isinstance(data, list) else (data or {}).get("objects", []) or []
+        )
         if not items:
             return {"objects": fol.Detections(detections=[])}
         fd = self._parse_frame_detections(items, sample)
@@ -1361,7 +1382,11 @@ class Gemma4VideoModel(Gemma4BaseModel):
         return {fn: {"objects": d} for fn, d in fd.items()}
 
     def _parse_ocr_only(self, data, sample) -> dict:
-        items = data if isinstance(data, list) else (data or {}).get("text_content", []) or []
+        items = (
+            data
+            if isinstance(data, list)
+            else (data or {}).get("text_content", []) or []
+        )
         if not items:
             return {"text_content": fol.Detections(detections=[])}
         fd = self._parse_frame_detections(items, sample, text_key="text")
@@ -1376,7 +1401,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
         for k, v in data.items():
             if isinstance(v, str):
                 labels[k] = v
-            elif isinstance(v, dict) and all(isinstance(x, (str, int, float, bool)) for x in v.values()):
+            elif isinstance(v, dict) and all(
+                isinstance(x, (str, int, float, bool)) for x in v.values()
+            ):
                 for sk, sv in v.items():
                     labels[f"{k}_{sk}"] = fol.Classification(label=str(sv).capitalize())
             elif isinstance(v, list) and v and isinstance(v[0], dict):
@@ -1386,7 +1413,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
                     if d:
                         labels[k] = d
                 elif all(x in first for x in ["time", "bbox_2d"]):
-                    fd = self._parse_frame_detections(v, sample, text_key="text" if "text" in first else None)
+                    fd = self._parse_frame_detections(
+                        v, sample, text_key="text" if "text" in first else None
+                    )
                     for fn, d in fd.items():
                         labels.setdefault(fn, {})[k] = d
         return labels
@@ -1400,14 +1429,21 @@ class Gemma4VideoModel(Gemma4BaseModel):
                 start, end = item.get("start", "00:00.00"), item.get("end", "00:00.00")
                 label = str(item.get("description", "event")).capitalize()
             elif label_type == "objects":
-                start, end = item.get("first_appears", "00:00.00"), item.get("last_appears", "00:00.00")
+                start, end = (
+                    item.get("first_appears", "00:00.00"),
+                    item.get("last_appears", "00:00.00"),
+                )
                 label = str(item.get("name", "object")).capitalize()
             else:
                 start, end = item.get("start", "00:00.00"), item.get("end", "00:00.00")
                 label = str(item.get("text", "text")).capitalize()
             s_sec = self._ts(start)
             e_sec = self._ts(end)
-            dets.append(fol.TemporalDetection.from_timestamps([s_sec, e_sec], label=label, sample=sample))
+            dets.append(
+                fol.TemporalDetection.from_timestamps(
+                    [s_sec, e_sec], label=label, sample=sample
+                )
+            )
         return fol.TemporalDetections(detections=dets) if dets else None
 
     def _parse_frame_detections(self, items, sample, text_key=None):
@@ -1424,7 +1460,10 @@ class Gemma4VideoModel(Gemma4BaseModel):
             if x2 <= x1 or y2 <= y1:
                 continue
             label = item.get("text" if text_key else "label", "")
-            det = fol.Detection(label=label, bounding_box=[x1/1000, y1/1000, (x2-x1)/1000, (y2-y1)/1000])
+            det = fol.Detection(
+                label=label,
+                bounding_box=[x1 / 1000, y1 / 1000, (x2 - x1) / 1000, (y2 - y1) / 1000],
+            )
             if text_key:
                 det[text_key] = item.get(text_key, "")
             frames.setdefault(fn, fol.Detections(detections=[])).detections.append(det)
@@ -1433,7 +1472,11 @@ class Gemma4VideoModel(Gemma4BaseModel):
     @staticmethod
     def _ts(t: str) -> float:
         m = re.match(r"(\d+):(\d+)\.(\d+)", str(t))
-        return (int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 100.0) if m else 0.0
+        return (
+            (int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3)) / 100.0)
+            if m
+            else 0.0
+        )
 
     @staticmethod
     def _get_fps(sample) -> float:
@@ -1449,13 +1492,21 @@ class Gemma4VideoModel(Gemma4BaseModel):
         if isinstance(arg, dict):
             item = arg
         else:
-            fp = arg if isinstance(arg, str) else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
+            fp = (
+                arg
+                if isinstance(arg, str)
+                else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
+            )
             prompt = None
             if sample and "prompt_field" in self._fields:
                 fn = self._fields["prompt_field"]
                 if sample.has_field(fn):
                     prompt = sample.get_field(fn)
-            item = {"filepath": fp, "prompt": prompt, "metadata": getattr(sample, "metadata", None) if sample else None}
+            item = {
+                "filepath": fp,
+                "prompt": prompt,
+                "metadata": getattr(sample, "metadata", None) if sample else None,
+            }
         return self.predict_all([item], samples=[sample] if sample else None)[0]
 
     def predict_all(self, batch: list, samples=None) -> list:
@@ -1467,9 +1518,16 @@ class Gemma4VideoModel(Gemma4BaseModel):
         results = []
         for i, item in enumerate(batch):
             sample = samples[i] if samples else None
-            needs_meta = self.config.operation in ("comprehensive", "temporal_localization", "tracking", "ocr")
+            needs_meta = self.config.operation in (
+                "comprehensive",
+                "temporal_localization",
+                "tracking",
+                "ocr",
+            )
             if needs_meta and not item.get("metadata"):
-                raise ValueError(f"'{self.config.operation}' requires metadata. Call dataset.compute_metadata().")
+                raise ValueError(
+                    f"'{self.config.operation}' requires metadata. Call dataset.compute_metadata()."
+                )
 
             prompt = item.get("prompt")
             if self.config.operation == "custom" and prompt:
