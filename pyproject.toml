@@ -9,4 +9,5 @@ dependencies = [
     "torch>=2.0.0",
     "torchvision",
     "accelerate",
+    "torchcodec>=0.11.0",
 ]

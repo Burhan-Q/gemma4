@@ -18,7 +18,8 @@
                     "transformers>=4.52.0",
                     "torch",
                     "torchvision",
-                    "accelerate"
+                    "accelerate",
+                    "torchcodec"
                 ],
                 "cpu": {
                     "support": true
@@ -60,7 +61,8 @@
                     "transformers>=4.52.0",
                     "torch",
                     "torchvision",
-                    "accelerate"
+                    "accelerate",
+                    "torchcodec"
                 ],
                 "cpu": {
                     "support": true
@@ -102,7 +104,8 @@
                     "transformers>=4.52.0",
                     "torch",
                     "torchvision",
-                    "accelerate"
+                    "accelerate",
+                    "torchcodec"
                 ],
                 "cpu": {
                     "support": true
@@ -142,7 +145,8 @@
                     "transformers>=4.52.0",
                     "torch",
                     "torchvision",
-                    "accelerate"
+                    "accelerate",
+                    "torchcodec"
                 ],
                 "cpu": {
                     "support": true
