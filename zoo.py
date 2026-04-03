@@ -38,7 +38,7 @@ from fiftyone.utils.torch import GetItem
 
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("gemma4.zoo")
 
 
 def _setup_logging():
@@ -53,15 +53,19 @@ def _setup_logging():
     level = getattr(logging, level_name, logging.INFO)
     logger.setLevel(level)
 
-    if not logger.handlers:
-        ch = logging.StreamHandler()
-        ch.setLevel(level)
-        fmt = logging.Formatter(
-            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-            datefmt="%H:%M:%S",
-        )
-        ch.setFormatter(fmt)
-        logger.addHandler(ch)
+    # Guard: only add handlers once, even if module is re-imported
+    if logger.handlers:
+        return
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
 
     # Optional file logging
     logfile_flag = os.environ.get("FIFTYONE_GEMMA4_LOGFILE", "").strip().lower()
@@ -195,7 +199,7 @@ _POINT_TOOL = {
                             "point_2d": {
                                 "type": "array",
                                 "items": {"type": "integer"},
-                                "description": "[x, y] center point 0-1000",
+                                "description": "[y, x] center point 0-1000",
                             },
                         },
                         "required": ["label", "point_2d"],
@@ -536,12 +540,195 @@ class Gemma4BaseModel(
         except Exception as e:
             logger.warning("parse_response failed: %s", e)
 
-        # Fallback: plain decode
+        # Fallback: re-parse tool call from raw output (special tokens
+        # preserved) using the same <|"|> → JSON conversion as
+        # transformers' _gemma4_json_to_json, plus _repair_json for
+        # minor issues like double commas.
+        fallback_tc = self._extract_tool_calls_from_raw(raw)
+        if fallback_tc:
+            return {
+                "role": "assistant",
+                "thinking": None,
+                "content": None,
+                "tool_calls": fallback_tc,
+                "_raw": raw,
+            }
+
+        # Final fallback: plain decode
         fallback = self._processor.decode(
             generated, skip_special_tokens=True
         )
         logger.debug("Fallback plain decode:\n%s", fallback)
         return {"content": fallback}
+
+    # -- Fallback tool call parser ---------------------------------------------
+
+    def _extract_tool_calls_from_raw(self, raw: str) -> Optional[list]:
+        """Extract tool calls from raw output when parse_response fails.
+
+        Uses the same conversion as transformers' ``_gemma4_json_to_json``
+        (``<|"|>`` → JSON strings, bare keys → quoted keys) plus
+        ``_repair_json`` for minor issues like double commas.
+
+        Based on Google's documented ``extract_tool_calls`` approach:
+        https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4
+        """
+        # Match <|tool_call>call:name{...}<tool_call|>
+        # Use greedy match on args to get the full nested structure,
+        # anchored to <tool_call|> to avoid over-matching.
+        matches = re.findall(
+            r"<\|tool_call>call:(\w+)(.*?)<tool_call\|>", raw, re.DOTALL
+        )
+        if not matches:
+            return None
+
+        tool_calls = []
+        for func_name, body in matches:
+            # body is like "{detections:[...]}" — may include leading {
+            # and trailing } but the regex is non-greedy so we get
+            # everything between call:name and <tool_call|>
+            body = body.strip()
+            if not body.startswith("{") or not body.endswith("}"):
+                continue
+
+            args = self._gemma4_to_json(body)
+            if args is not None:
+                tool_calls.append({
+                    "type": "function",
+                    "function": {"name": func_name, "arguments": args},
+                })
+
+        return tool_calls if tool_calls else None
+
+    def _gemma4_to_json(self, text: str) -> Optional[dict]:
+        """Convert Gemma4 tool call format to a Python dict.
+
+        Handles:
+        - ``<|"|>string<|"|>`` delimiters → JSON quoted strings
+        - Regular ``"string"`` quotes (model sometimes uses these)
+        - Bare keys → quoted keys
+        - Bare non-string values (integers, booleans)
+        - Minor JSON errors via ``_repair_json``
+        """
+        strings: list[str] = []
+
+        def _capture(m):
+            strings.append(m.group(1))
+            return f"\x00{len(strings) - 1}\x00"
+
+        # 1. Capture <|"|> delimited strings and replace with placeholders
+        converted = re.sub(
+            r'<\|"\|>(.*?)<\|"\|>', _capture, text, flags=re.DOTALL
+        )
+
+        # 2. Fix broken key": patterns where model fuses key with quote.
+        #    e.g. {label":"value"} → {label:"value"}
+        converted = re.sub(r'(\w)":', r'\1:', converted)
+
+        # 2b. Fix duplicated/truncated key prefixes
+        converted = re.sub(r'\bbox_box_2d\b', 'box_2d', converted)
+        converted = re.sub(r'\bbox_box\b', 'box_2d', converted)
+        converted = re.sub(r'\bpoint_point_2d\b', 'point_2d', converted)
+        converted = re.sub(r'\bpoint_point\b', 'point_2d', converted)
+
+        # 2c. Replace single-quoted strings with placeholders
+        converted = re.sub(r"'([^']*)'", _capture, converted)
+
+        # 3. Capture regular "..." quoted strings (model sometimes uses
+        #    these instead of <|"|> tokens) and protect from key-quoting
+        converted = re.sub(r'"([^"]*)"', _capture, converted)
+
+        # 4. Quote bare keys: key: → "key":
+        converted = re.sub(r"(?<=[{,\[])(\s*)(\w+)\s*:", r'\1"\2":', converted)
+
+        # 5. Restore all captured strings as JSON-escaped values
+        for i, s in enumerate(strings):
+            converted = converted.replace(f"\x00{i}\x00", json.dumps(s))
+
+        # 6. Quote remaining bare string values (not numbers, not already quoted)
+        # Matches: value that starts with a letter, ends at , } or ]
+        converted = re.sub(
+            r':\s*([a-zA-Z][a-zA-Z0-9_ ]*?)(\s*[,}\]])',
+            r': "\1"\2',
+            converted,
+        )
+
+        # 7. Fix minor JSON errors
+        converted = self._repair_json(converted)
+
+        try:
+            return json.loads(converted)
+        except json.JSONDecodeError:
+            pass
+
+        # Item-level recovery: when one garbled entry (e.g. truncated bbox
+        # array) makes the full json.loads fail, extract individual {...}
+        # items from the array and parse each separately. This salvages
+        # valid entries instead of losing the entire response.
+        return self._recover_items(converted)
+
+    @staticmethod
+    def _depth_scan(text: str, start: int, open_ch: str, close_ch: str) -> int:
+        """Find the matching close bracket, skipping quoted strings."""
+        depth = 1
+        i = start + 1
+        n = len(text)
+        while i < n and depth > 0:
+            c = text[i]
+            if c == '"' and (i == 0 or text[i - 1] != "\\"):
+                # Skip to end of string
+                i += 1
+                while i < n and not (text[i] == '"' and text[i - 1] != "\\"):
+                    i += 1
+            elif c == open_ch:
+                depth += 1
+            elif c == close_ch:
+                depth -= 1
+            i += 1
+        return i
+
+    @classmethod
+    def _recover_items(cls, text: str) -> Optional[dict]:
+        """Recover individual valid items when json.loads fails on the whole.
+
+        Finds the outer key (e.g. "detections"), extracts individual {...}
+        items from the array using balanced-brace matching, parses each
+        independently, and returns the outer dict with only valid items.
+        """
+        # Find outer key and array: {"key":[...]}
+        m = re.match(r'\s*\{\s*"(\w+)"\s*:\s*\[', text)
+        if not m:
+            logger.debug("Item recovery: no outer key found in:\n%s", text)
+            return None
+
+        outer_key = m.group(1)
+        arr_start = m.end() - 1  # position of '['
+
+        # Find matching ']' (skip quoted strings)
+        arr_end = cls._depth_scan(text, arr_start, "[", "]")
+        arr_content = text[arr_start + 1 : arr_end - 1]
+
+        # Extract individual {...} items by balanced brace matching
+        items = []
+        i = 0
+        while i < len(arr_content):
+            if arr_content[i] == '{':
+                end = cls._depth_scan(arr_content, i, "{", "}")
+                item_str = arr_content[i:end]
+                try:
+                    items.append(json.loads(item_str))
+                except json.JSONDecodeError:
+                    logger.debug("Item recovery: skipped garbled item: %s", item_str)
+                i = end
+            else:
+                i += 1
+
+        if not items:
+            logger.debug("Item recovery: no valid items found")
+            return None
+
+        logger.debug("Item recovery: %d valid items from array", len(items))
+        return {outer_key: items}
 
     # -- JSON extraction -------------------------------------------------------
 
@@ -782,73 +969,26 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
         thinking = parsed.get("thinking")
 
-        # 1. Try tool_calls from parse_response (cleanest path)
+        # 1. Try tool_calls (from parse_response or _generate fallback)
         tool_calls = parsed.get("tool_calls")
         if tool_calls:
             args = tool_calls[0].get("function", {}).get("arguments", {})
             if args:
                 return self._structured_to_label(args, thinking)
 
-        # 2. Try content — might contain tool call text or plain text
-        content = parsed.get("content") or ""
-        if content.strip().startswith("call:"):
-            args = self._parse_tool_call_text(content)
-            if args:
-                return self._structured_to_label(args, thinking)
-
-        # 3. Fallback: check raw output for tool call that parse_response
-        #    failed to extract (e.g. malformed JSON in tool call arguments)
+        # 2. Try raw output recovery (handles cases where _generate's
+        #    fallback wasn't reached or returned partial results)
         raw = parsed.get("_raw", "")
-        if raw and "call:" in raw and not content:
-            # Extract tool call text from raw output
-            m = re.search(r"call:\w+(\{.*)", raw, re.DOTALL)
-            if m:
-                args = self._parse_tool_call_text("call:" + m.group(0).split("call:", 1)[-1])
+        if raw and "<tool_call" in raw:
+            fallback_tc = self._extract_tool_calls_from_raw(raw)
+            if fallback_tc:
+                args = fallback_tc[0].get("function", {}).get("arguments", {})
                 if args:
                     return self._structured_to_label(args, thinking)
 
-        # 4. Text content path (text ops, or final fallback)
+        # 3. Text content path (text ops, or final fallback)
+        content = parsed.get("content") or ""
         return self._text_to_label(content, thinking)
-
-    @staticmethod
-    def _parse_tool_call_text(text: str) -> Optional[dict]:
-        """Parse a tool call from plain text like 'call:func_name{...}'.
-
-        The model sometimes outputs tool calls as content text rather than
-        using the special token format that parse_response expects.
-        Handles unquoted keys/values and common format variations.
-        """
-        m = re.match(r"call:\w+(\{.*)", text.strip(), re.DOTALL)
-        if not m:
-            return None
-
-        raw_json = m.group(1)
-
-        # Fix common model output issues:
-        # 1. bbox_bbox → box_2d (common typo from model)
-        fixed = raw_json.replace("bbox_bbox", "box_2d")
-        fixed = fixed.replace("bbox_2d", "box_2d")
-        # 2. Set-literal bbox {40,10,680,990} → array [40,10,680,990]
-        fixed = re.sub(
-            r'(box_2d|"box_2d")\s*:\s*\{(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\}',
-            r'\1: [\2, \3, \4, \5]',
-            fixed,
-        )
-        # 3. Add quotes around unquoted keys: {key: → {"key":
-        fixed = re.sub(r'([{,]\s*)(\w+)\s*:', r'\1"\2":', fixed)
-        # 4. Add quotes around unquoted string values (not numbers)
-        fixed = re.sub(
-            r':\s*([a-zA-Z][a-zA-Z0-9_ ]*?)([,}\]])',
-            r': "\1"\2',
-            fixed,
-        )
-
-        try:
-            return json.loads(fixed)
-        except json.JSONDecodeError as e:
-            logger.warning("Failed to parse tool call text: %s", e)
-            logger.debug("Tool call text after fixes:\n%s", fixed)
-            return None
 
     def _structured_to_label(self, args: dict, thinking):
         """Convert tool call arguments to a FiftyOne Label."""
@@ -922,7 +1062,9 @@ class Gemma4ImageModel(Gemma4BaseModel):
                     # Try native key first, then fallbacks
                     bbox = (
                         box.get("box_2d")       # Gemma4 native
-                        or box.get("bbox_2d")    # our old schema
+                        or box.get("box_box_2d") # model typo
+                        or box.get("box_box")    # model typo
+                        or box.get("bbox_2d")
                         or box.get("bbox_bbox")  # model typo
                         or box.get("bbox")
                         or box.get("bounding_box")
@@ -1000,7 +1142,12 @@ class Gemma4ImageModel(Gemma4BaseModel):
                     y_val, x_val = float(pt[0]), float(pt[1])
                     x, y, label = x_val, y_val, "point"
                 elif isinstance(pt, dict):
-                    coords = pt.get("point_2d") or pt.get("point")
+                    coords = (
+                        pt.get("point_2d")
+                        or pt.get("point_point")   # model typo
+                        or pt.get("point_point_2d") # model typo
+                        or pt.get("point")
+                    )
                     if not coords or len(coords) < 2:
                         continue
                     # Gemma4 native: [y, x]
