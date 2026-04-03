@@ -480,6 +480,32 @@ Video operations return dicts (sample-level and/or frame-level labels).
 
 ---
 
+## Logging
+
+Logging is controlled via environment variables. By default, the logger outputs at `INFO` level to stderr.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FIFTYONE_GEMMA4_LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `FIFTYONE_GEMMA4_LOGFILE` | (unset) | Set to `1`, `true`, or `True` to enable logging to file |
+
+Log files are named `run-001.log`, `run-002.log`, etc. in the current working directory, auto-incrementing.
+
+```bash
+# Verbose console logging
+FIFTYONE_GEMMA4_LOG_LEVEL=DEBUG python my_script.py
+
+# Enable file logging (creates run-001.log, etc.)
+FIFTYONE_GEMMA4_LOGFILE=1 python my_script.py
+
+# Both: debug to console + file
+FIFTYONE_GEMMA4_LOG_LEVEL=DEBUG FIFTYONE_GEMMA4_LOGFILE=1 python my_script.py
+```
+
+At `DEBUG` level, the full raw model output is logged for each sample -- useful for diagnosing parsing failures.
+
+---
+
 ## Technical Details
 
 - **Model class**: Uses `AutoModelForImageTextToText` from `transformers` (not `AutoModelForMultimodalLM`), matching the official transformers documentation for Gemma 4.

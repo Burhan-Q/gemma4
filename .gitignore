@@ -5,4 +5,4 @@ __pycache__/
 *.safetensors
 gemma-4-*/
 gemma_diag*.py
-
+*.log

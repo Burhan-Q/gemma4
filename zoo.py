@@ -20,8 +20,10 @@ Inference pipeline:
     → extract tool_calls arguments (structured) or content text (free-form)
 """
 
+import glob as _glob
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,6 +39,46 @@ from fiftyone.utils.torch import GetItem
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 logger = logging.getLogger(__name__)
+
+
+def _setup_logging():
+    """Configure the gemma4 logger from environment variables.
+
+    - ``FIFTYONE_GEMMA4_LOG_LEVEL``: logging level name (default ``INFO``).
+    - ``FIFTYONE_GEMMA4_LOGFILE``: set to ``1``, ``true``, or ``True`` to
+      enable logging to file.  Files are named ``run-001.log``,
+      ``run-002.log``, etc. in the current working directory.
+    """
+    level_name = os.environ.get("FIFTYONE_GEMMA4_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+
+    if not logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setLevel(level)
+        fmt = logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+
+    # Optional file logging
+    logfile_flag = os.environ.get("FIFTYONE_GEMMA4_LOGFILE", "").strip().lower()
+    if logfile_flag in ("1", "true"):
+        existing = sorted(_glob.glob("run-[0-9][0-9][0-9].log"))
+        next_num = int(existing[-1][4:7]) + 1 if existing else 1
+        fname = f"run-{next_num:03d}.log"
+        fh = logging.FileHandler(fname, mode="w")
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        ))
+        logger.addHandler(fh)
+        logger.info("Logging to file: %s", fname)
+
+
+_setup_logging()
 
 
 # =============================================================================
@@ -392,7 +434,7 @@ class Gemma4BaseModel(
 
     def _load_model(self):
         """Lazy-load model and processor. bfloat16 on Ampere+ GPUs."""
-        logger.info(f"Loading Gemma 4 from {self.config.model_path}")
+        logger.info("Loading Gemma 4 from %s", self.config.model_path)
 
         model_kwargs: dict = {"device_map": self.device}
         if self.device == "cuda" and torch.cuda.is_available():
@@ -482,20 +524,24 @@ class Gemma4BaseModel(
 
         # Always use parse_response — it properly separates thinking/content/tool_calls
         raw = self._processor.decode(generated, skip_special_tokens=False)
+        logger.debug("Raw output:\n%s", raw)
         try:
             parsed = self._processor.parse_response(raw)
             if isinstance(parsed, dict):
                 parsed["_raw"] = raw  # Keep raw for fallback parsing
+                logger.debug("Parsed thinking:\n%s", parsed.get("thinking"))
+                logger.debug("Parsed content:\n%s", parsed.get("content"))
+                logger.debug("Parsed tool_calls:\n%s", parsed.get("tool_calls"))
                 return parsed
         except Exception as e:
-            logger.debug(f"parse_response failed: {e}")
+            logger.warning("parse_response failed: %s", e)
 
         # Fallback: plain decode
-        return {
-            "content": self._processor.decode(
-                generated, skip_special_tokens=True
-            )
-        }
+        fallback = self._processor.decode(
+            generated, skip_special_tokens=True
+        )
+        logger.debug("Fallback plain decode:\n%s", fallback)
+        return {"content": fallback}
 
     # -- JSON extraction -------------------------------------------------------
 
@@ -565,7 +611,7 @@ class Gemma4BaseModel(
                             return r
                         break
 
-        logger.debug(f"No JSON found in: {text[:500]}")
+        logger.debug("No JSON found in text:\n%s", text)
         return None
 
     # -- Generation parameter properties ---------------------------------------
@@ -719,6 +765,10 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
     def _run_inference(self, filepath: str, prompt: str):
         """Run inference on a single image. Returns a FiftyOne Label."""
+        logger.info(
+            "[%s] %s", self.config.operation, os.path.basename(filepath),
+        )
+
         messages = [
             {"role": "system", "content": [{"type": "text", "text": self.system_prompt}]},
             {"role": "user", "content": [
@@ -795,8 +845,9 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
         try:
             return json.loads(fixed)
-        except json.JSONDecodeError:
-            logger.debug("Failed to parse tool call text: %s", fixed[:500])
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse tool call text: %s", e)
+            logger.debug("Tool call text after fixes:\n%s", fixed)
             return None
 
     def _structured_to_label(self, args: dict, thinking):
@@ -822,7 +873,8 @@ class Gemma4ImageModel(Gemma4BaseModel):
         # Structured op that didn't produce a tool call — try JSON extraction
         data = self._extract_json(text)
         if not data:
-            logger.warning("No structured output for %s. Content: %s", op, text[:500])
+            logger.warning("No structured output for %s", op)
+            logger.debug("Content for failed structured extraction:\n%s", text)
 
         if op == "detect":
             return self._to_detections(data, thinking)
@@ -863,6 +915,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
             return fo.Detections(detections=[])
 
         dets = []
+        skipped = 0
         for box in boxes:
             try:
                 if isinstance(box, dict):
@@ -879,9 +932,13 @@ class Gemma4ImageModel(Gemma4BaseModel):
                 elif isinstance(box, list) and len(box) >= 4:
                     bbox, label = box, "object"
                 else:
+                    logger.debug("Skipping unrecognized box format: %s", box)
+                    skipped += 1
                     continue
 
                 if not bbox:
+                    logger.debug("No bbox found in: %s", box)
+                    skipped += 1
                     continue
 
                 # Handle bbox as dict {xmin:, ymin:, xmax:, ymax:}
@@ -911,8 +968,10 @@ class Gemma4ImageModel(Gemma4BaseModel):
                     det["reasoning"] = reasoning
                 dets.append(det)
             except Exception as e:
-                logger.debug(f"Error processing box {box}: {e}")
+                logger.debug("Error processing box %s: %s", box, e)
 
+        if skipped:
+            logger.debug("Skipped %d/%d box entries", skipped, len(boxes))
         return fo.Detections(detections=dets)
 
     def _to_keypoints(self, points, reasoning=None) -> fo.Keypoints:
@@ -961,7 +1020,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
                     kp["reasoning"] = reasoning
                 kps.append(kp)
             except Exception as e:
-                logger.debug(f"Error processing point {pt}: {e}")
+                logger.debug("Error processing point %s: %s", pt, e)
 
         return fo.Keypoints(keypoints=kps)
 
@@ -998,7 +1057,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
                     c["reasoning"] = reasoning
                 cls_list.append(c)
             except Exception as e:
-                logger.debug(f"Error processing classification {cls}: {e}")
+                logger.debug("Error processing classification %s: %s", cls, e)
 
         return fo.Classifications(classifications=cls_list)
 
@@ -1104,6 +1163,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
 
     def _run_inference(self, filepath: str, prompt: str) -> str:
         """Run video inference. Returns content text from parse_response."""
+        logger.info(
+            "[%s] %s", self.config.operation, os.path.basename(filepath),
+        )
         messages = [
             {"role": "user", "content": [
                 {"type": "video", "video": filepath},
