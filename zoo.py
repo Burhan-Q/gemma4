@@ -25,7 +25,8 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any, Self
 
 import torch
 
@@ -41,7 +42,7 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 logger = logging.getLogger("gemma4.zoo")
 
 
-def _setup_logging():
+def _setup_logging() -> None:
     """Configure the gemma4 logger from environment variables.
 
     - ``FIFTYONE_GEMMA4_LOG_LEVEL``: logging level name (default ``INFO``).
@@ -138,7 +139,7 @@ DEFAULT_OCR_SYSTEM_PROMPT = (
     "as much as possible."
 )
 
-IMAGE_OPERATIONS: Dict[str, str] = {
+IMAGE_OPERATIONS: dict[str, str] = {
     "detect": DEFAULT_DETECT_SYSTEM_PROMPT,
     "point": DEFAULT_POINT_SYSTEM_PROMPT,
     "classify": DEFAULT_CLASSIFY_SYSTEM_PROMPT,
@@ -234,7 +235,7 @@ _CLASSIFY_TOOL = {
     },
 }
 
-_OPERATION_TOOLS: Dict[str, Optional[list]] = {
+_OPERATION_TOOLS: dict[str, list[dict[str, Any]] | None] = {
     "detect": [_DETECT_TOOL],
     "point": [_POINT_TOOL],
     "classify": [_CLASSIFY_TOOL],
@@ -248,7 +249,7 @@ _OPERATION_TOOLS: Dict[str, Optional[list]] = {
 # Video operation prompts
 # =============================================================================
 
-VIDEO_OPERATIONS: Dict[str, Dict] = {
+VIDEO_OPERATIONS: dict[str, dict[str, str | None]] = {
     "comprehensive": {
         "prompt": (
             "Analyze this video comprehensively in JSON format:\n\n"
@@ -319,7 +320,7 @@ def get_device() -> str:
     return "cpu"
 
 
-def _identity_collate(batch):
+def _identity_collate(batch: list[Any]) -> list[Any]:
     """Module-level identity collate (picklable for DataLoader workers)."""
     return batch
 
@@ -333,10 +334,10 @@ class Gemma4GetItem(GetItem):
     """Extracts filepath, optional per-sample prompt, and metadata."""
 
     @property
-    def required_keys(self) -> List[str]:
+    def required_keys(self) -> list[str]:
         return ["filepath", "metadata"]
 
-    def __call__(self, sample_dict: dict) -> dict:
+    def __call__(self, sample_dict: dict[str, Any]) -> dict[str, Any]:
         return {
             "filepath": sample_dict["filepath"],
             "prompt": sample_dict.get("prompt_field"),
@@ -352,7 +353,7 @@ class Gemma4GetItem(GetItem):
 class Gemma4BaseConfig(fout.TorchImageModelConfig):
     """Shared configuration: model path and text generation parameters."""
 
-    def __init__(self, d: dict):
+    def __init__(self, d: dict[str, Any]) -> None:
         if "raw_inputs" not in d:
             d["raw_inputs"] = True
         super().__init__(d)
@@ -361,20 +362,22 @@ class Gemma4BaseConfig(fout.TorchImageModelConfig):
             d, "model_path", default="google/gemma-4-E4B-it"
         )
         # Higher default to accommodate model thinking before tool calls
-        self.max_new_tokens = self.parse_number(d, "max_new_tokens", default=2048)
-        self.do_sample = self.parse_bool(d, "do_sample", default=True)
-        self.temperature = self.parse_number(d, "temperature", default=1.0)
-        self.top_p = self.parse_number(d, "top_p", default=0.95)
-        self.top_k = self.parse_number(d, "top_k", default=64)
-        self.repetition_penalty = self.parse_number(
+        self.max_new_tokens: int = self.parse_number(d, "max_new_tokens", default=2048)
+        self.do_sample: bool = self.parse_bool(d, "do_sample", default=True)
+        self.temperature: float = self.parse_number(d, "temperature", default=1.0)
+        self.top_p: float = self.parse_number(d, "top_p", default=0.95)
+        self.top_k: int = self.parse_number(d, "top_k", default=64)
+        self.repetition_penalty: float = self.parse_number(
             d, "repetition_penalty", default=1.0
         )
-        self.enable_thinking = self.parse_bool(d, "enable_thinking", default=False)
+        self.enable_thinking: bool = self.parse_bool(
+            d, "enable_thinking", default=False
+        )
         # Vision token budget per image: 70, 140, 280, 560, 1120
-        self.max_soft_tokens = self.parse_number(d, "max_soft_tokens", default=280)
+        self.max_soft_tokens: int = self.parse_number(d, "max_soft_tokens", default=280)
         # KV cache strategy passed to model.generate(). "static" pre-allocates
         # and is used in official Gemma4 examples. None uses the default.
-        self.cache_implementation = self.parse_string(
+        self.cache_implementation: str | None = self.parse_string(
             d, "cache_implementation", default=None
         )
 
@@ -387,21 +390,21 @@ class Gemma4BaseConfig(fout.TorchImageModelConfig):
 class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMixin):
     """Shared base for image and video Gemma 4 zoo models."""
 
-    def __init__(self, config: Gemma4BaseConfig):
+    def __init__(self, config: Gemma4BaseConfig) -> None:
         fom.SamplesMixin.__init__(self)
         SupportsGetItem.__init__(self)
 
-        self._preprocess = False
-        self.config = config
-        self.device = get_device()
-        self._fields: dict = {}
-        self._model = None
-        self._processor = None
+        self._preprocess: bool = False
+        self.config: Gemma4BaseConfig = config
+        self.device: str = get_device()
+        self._fields: dict[str, str] = {}
+        self._model: AutoModelForImageTextToText | None = None
+        self._processor: AutoProcessor | None = None
 
     # -- FiftyOne boilerplate --------------------------------------------------
 
     @property
-    def transforms(self):
+    def transforms(self) -> None:
         return None
 
     @property
@@ -409,7 +412,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self._preprocess
 
     @preprocess.setter
-    def preprocess(self, value: bool):
+    def preprocess(self, value: bool) -> None:
         self._preprocess = value
 
     @property
@@ -417,11 +420,11 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return False
 
     @property
-    def needs_fields(self) -> dict:
+    def needs_fields(self) -> dict[str, str]:
         return self._fields
 
     @needs_fields.setter
-    def needs_fields(self, fields: dict):
+    def needs_fields(self, fields: dict[str, str]) -> None:
         self._fields = fields
 
     @property
@@ -429,19 +432,21 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return True
 
     @property
-    def collate_fn(self):
+    def collate_fn(self) -> Callable[[list[Any]], list[Any]]:
         return _identity_collate
 
-    def build_get_item(self, field_mapping=None) -> Gemma4GetItem:
+    def build_get_item(
+        self, field_mapping: dict[str, str] | None = None
+    ) -> Gemma4GetItem:
         return Gemma4GetItem(field_mapping=field_mapping)
 
     # -- Model loading ---------------------------------------------------------
 
-    def _load_model(self):
+    def _load_model(self) -> None:
         """Lazy-load model and processor. bfloat16 on Ampere+ GPUs."""
         logger.info("Loading Gemma 4 from %s", self.config.model_path)
 
-        model_kwargs: dict = {"device_map": self.device}
+        model_kwargs: dict[str, Any] = {"device_map": self.device}
         if self.device == "cuda" and torch.cuda.is_available():
             cap = torch.cuda.get_device_capability(self.device)
             model_kwargs["torch_dtype"] = torch.bfloat16 if cap[0] >= 8 else "auto"
@@ -462,7 +467,9 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
 
     # -- Shared inference ------------------------------------------------------
 
-    def _generate(self, messages: list, tools: list = None) -> dict:
+    def _generate(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """Core generate + parse_response pipeline.
 
         Returns the parsed response dict from processor.parse_response():
@@ -473,14 +480,17 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         if self._model is None:
             self._load_model()
 
+        assert self._model is not None
+        assert self._processor is not None
+
         device = next(self._model.parameters()).device
 
-        chat_kwargs = {"enable_thinking": self.config.enable_thinking}
+        chat_kwargs: dict[str, Any] = {"enable_thinking": self.config.enable_thinking}
         if tools:
             chat_kwargs["tools"] = tools
 
         # Pass max_soft_tokens to control vision token budget
-        proc_kwargs = {}
+        proc_kwargs: dict[str, Any] = {}
         if self.config.max_soft_tokens != 280:
             proc_kwargs["images_kwargs"] = {
                 "max_soft_tokens": self.config.max_soft_tokens
@@ -498,7 +508,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
 
         input_len = inputs["input_ids"].shape[-1]
 
-        gen_kwargs = {
+        gen_kwargs: dict[str, Any] = {
             "max_new_tokens": self.config.max_new_tokens,
             "do_sample": self.config.do_sample,
             "repetition_penalty": self.config.repetition_penalty,
@@ -560,7 +570,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
 
     # -- Fallback tool call parser ---------------------------------------------
 
-    def _extract_tool_calls_from_raw(self, raw: str) -> Optional[list]:
+    def _extract_tool_calls_from_raw(self, raw: str) -> list[dict[str, Any]] | None:
         """Extract tool calls from raw output when parse_response fails.
 
         Uses the same conversion as transformers' ``_gemma4_json_to_json``
@@ -599,7 +609,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
 
         return tool_calls if tool_calls else None
 
-    def _gemma4_to_json(self, text: str) -> Optional[dict]:
+    def _gemma4_to_json(self, text: str) -> dict[str, Any] | None:
         """Convert Gemma4 tool call format to a Python dict.
 
         Handles:
@@ -611,7 +621,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         """
         strings: list[str] = []
 
-        def _capture(m):
+        def _capture(m: re.Match[str]) -> str:
             strings.append(m.group(1))
             return f"\x00{len(strings) - 1}\x00"
 
@@ -685,7 +695,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return i
 
     @classmethod
-    def _recover_items(cls, text: str) -> Optional[dict]:
+    def _recover_items(cls, text: str) -> dict[str, Any] | None:
         """Recover individual valid items when json.loads fails on the whole.
 
         Finds the outer key (e.g. "detections"), extracts individual {...}
@@ -749,12 +759,12 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
                 break
         return s
 
-    def _extract_json(self, text: str) -> Optional[Any]:
+    def _extract_json(self, text: str) -> Any:
         """Extract JSON from model text output."""
         if not text or not text.strip():
             return None
 
-        def _try(s):
+        def _try(s: str) -> Any:
             try:
                 return json.loads(s)
             except (json.JSONDecodeError, ValueError):
@@ -805,7 +815,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self.config.max_new_tokens
 
     @max_new_tokens.setter
-    def max_new_tokens(self, value: int):
+    def max_new_tokens(self, value: int) -> None:
         self.config.max_new_tokens = value
 
     @property
@@ -813,7 +823,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self.config.do_sample
 
     @do_sample.setter
-    def do_sample(self, value: bool):
+    def do_sample(self, value: bool) -> None:
         self.config.do_sample = value
 
     @property
@@ -821,7 +831,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self.config.temperature
 
     @temperature.setter
-    def temperature(self, value: float):
+    def temperature(self, value: float) -> None:
         self.config.temperature = value
 
     @property
@@ -829,7 +839,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self.config.top_p
 
     @top_p.setter
-    def top_p(self, value: float):
+    def top_p(self, value: float) -> None:
         self.config.top_p = value
 
     @property
@@ -837,7 +847,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self.config.top_k
 
     @top_k.setter
-    def top_k(self, value: int):
+    def top_k(self, value: int) -> None:
         self.config.top_k = value
 
     @property
@@ -845,7 +855,7 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self.config.repetition_penalty
 
     @repetition_penalty.setter
-    def repetition_penalty(self, value: float):
+    def repetition_penalty(self, value: float) -> None:
         self.config.repetition_penalty = value
 
     @property
@@ -853,13 +863,13 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
         return self.config.enable_thinking
 
     @enable_thinking.setter
-    def enable_thinking(self, value: bool):
+    def enable_thinking(self, value: bool) -> None:
         self.config.enable_thinking = value
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: Any) -> bool:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -885,7 +895,7 @@ _OPERATION_SOFT_TOKEN_DEFAULTS = {
 
 
 class Gemma4ImageModelConfig(Gemma4BaseConfig):
-    def __init__(self, d: dict):
+    def __init__(self, d: dict[str, Any]) -> None:
         # Set operation-aware max_soft_tokens default before super().__init__
         # so the base class picks it up, but only if user didn't set it
         if "max_soft_tokens" not in d:
@@ -893,14 +903,16 @@ class Gemma4ImageModelConfig(Gemma4BaseConfig):
             d["max_soft_tokens"] = _OPERATION_SOFT_TOKEN_DEFAULTS.get(op, 280)
 
         super().__init__(d)
-        self.operation = self.parse_string(d, "operation", default="vqa")
+        self.operation: str = self.parse_string(d, "operation", default="vqa")
         if self.operation not in IMAGE_OPERATIONS:
             raise ValueError(
                 f"Invalid image operation: '{self.operation}'. "
                 f"Must be one of {list(IMAGE_OPERATIONS.keys())}"
             )
-        self.prompt = self.parse_string(d, "prompt", default=None)
-        self.system_prompt = self.parse_string(d, "system_prompt", default=None)
+        self.prompt: str | None = self.parse_string(d, "prompt", default=None)
+        self.system_prompt: str | None = self.parse_string(
+            d, "system_prompt", default=None
+        )
 
 
 class Gemma4ImageModel(Gemma4BaseModel):
@@ -924,7 +936,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
         return self.config.operation
 
     @operation.setter
-    def operation(self, value: str):
+    def operation(self, value: str) -> None:
         if value not in IMAGE_OPERATIONS:
             raise ValueError(
                 f"Invalid: '{value}'. Must be one of {list(IMAGE_OPERATIONS.keys())}"
@@ -936,20 +948,20 @@ class Gemma4ImageModel(Gemma4BaseModel):
         return self.config.system_prompt or IMAGE_OPERATIONS[self.config.operation]
 
     @system_prompt.setter
-    def system_prompt(self, value: Optional[str]):
+    def system_prompt(self, value: str | None) -> None:
         self.config.system_prompt = value
 
     @property
-    def prompt(self) -> Optional[str]:
+    def prompt(self) -> str | None:
         return self.config.prompt
 
     @prompt.setter
-    def prompt(self, value: Optional[str]):
+    def prompt(self, value: str | None) -> None:
         self.config.prompt = value
 
     # -- Inference -------------------------------------------------------------
 
-    def _run_inference(self, filepath: str, prompt: str):
+    def _run_inference(self, filepath: str, prompt: str) -> fol.Label:
         """Run inference on a single image. Returns a FiftyOne Label."""
         logger.info(
             "[%s] %s",
@@ -997,7 +1009,9 @@ class Gemma4ImageModel(Gemma4BaseModel):
         content = parsed.get("content") or ""
         return self._text_to_label(content, thinking)
 
-    def _structured_to_label(self, args: dict, thinking):
+    def _structured_to_label(
+        self, args: dict[str, Any], thinking: str | None
+    ) -> fol.Label:
         """Convert tool call arguments to a FiftyOne Label."""
         op = self.config.operation
         if op == "detect":
@@ -1008,7 +1022,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
             return self._to_classifications(args.get("labels", []), thinking)
         return fo.Classification(label=str(args))
 
-    def _text_to_label(self, text: str, thinking):
+    def _text_to_label(self, text: str, thinking: str | None) -> fol.Label:
         """Convert plain text content to a FiftyOne Label."""
         op = self.config.operation
         if op in ("vqa", "caption", "ocr"):
@@ -1033,7 +1047,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
     # -- Output converters -----------------------------------------------------
 
-    def _to_detections(self, boxes, reasoning=None) -> fo.Detections:
+    def _to_detections(self, boxes: Any, reasoning: str | None = None) -> fo.Detections:
         """Convert model detection output to fo.Detections.
 
         Gemma4 native format: {"box_2d": [y1, x1, y2, x2], "label": "..."}
@@ -1123,7 +1137,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
             logger.debug("Skipped %d/%d box entries", skipped, len(boxes))
         return fo.Detections(detections=dets)
 
-    def _to_keypoints(self, points, reasoning=None) -> fo.Keypoints:
+    def _to_keypoints(self, points: Any, reasoning: str | None = None) -> fo.Keypoints:
         if not points:
             return fo.Keypoints(keypoints=[])
 
@@ -1178,7 +1192,9 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
         return fo.Keypoints(keypoints=kps)
 
-    def _to_classifications(self, classes, reasoning=None) -> fo.Classifications:
+    def _to_classifications(
+        self, classes: Any, reasoning: str | None = None
+    ) -> fo.Classifications:
         if not classes:
             return fo.Classifications(classifications=[])
 
@@ -1217,7 +1233,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
     # -- predict / predict_all -------------------------------------------------
 
-    def predict(self, arg, sample=None):
+    def predict(self, arg: Any, sample: fo.Sample | None = None) -> fol.Label:
         if isinstance(arg, dict):
             item = arg
         else:
@@ -1235,13 +1251,15 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
         return self.predict_all([item], samples=[sample] if sample else None)[0]
 
-    def predict_all(self, batch: list, samples=None) -> list:
+    def predict_all(
+        self, batch: list[dict[str, Any]], samples: list[fo.Sample | None] | None = None
+    ) -> list[fol.Label]:
         if not batch:
             return []
         if self._model is None:
             self._load_model()
 
-        results = []
+        results: list[fol.Label] = []
         for item in batch:
             prompt = item.get("prompt") or self.config.prompt
             if not prompt:
@@ -1259,15 +1277,17 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
 
 class Gemma4VideoModelConfig(Gemma4BaseConfig):
-    def __init__(self, d: dict):
+    def __init__(self, d: dict[str, Any]) -> None:
         super().__init__(d)
-        self.operation = self.parse_string(d, "operation", default="description")
+        self.operation: str = self.parse_string(d, "operation", default="description")
         if self.operation not in VIDEO_OPERATIONS:
             raise ValueError(
                 f"Invalid video operation: '{self.operation}'. "
                 f"Must be one of {list(VIDEO_OPERATIONS.keys())}"
             )
-        self.custom_prompt = self.parse_string(d, "custom_prompt", default=None)
+        self.custom_prompt: str | None = self.parse_string(
+            d, "custom_prompt", default=None
+        )
         if self.operation == "custom" and self.custom_prompt is None:
             raise ValueError("custom_prompt required when operation='custom'")
         if self.operation != "custom" and self.custom_prompt is not None:
@@ -1291,7 +1311,7 @@ class Gemma4VideoModel(Gemma4BaseModel):
         return self.config.operation
 
     @operation.setter
-    def operation(self, value: str):
+    def operation(self, value: str) -> None:
         if value not in VIDEO_OPERATIONS:
             raise ValueError(
                 f"Invalid: '{value}'. Must be one of {list(VIDEO_OPERATIONS.keys())}"
@@ -1299,23 +1319,23 @@ class Gemma4VideoModel(Gemma4BaseModel):
         self.config.operation = value
 
     @property
-    def prompt(self) -> Optional[str]:
+    def prompt(self) -> str | None:
         if self.config.operation == "custom":
             return self.config.custom_prompt
         return VIDEO_OPERATIONS[self.config.operation]["prompt"]
 
     @prompt.setter
-    def prompt(self, value: str):
+    def prompt(self, value: str) -> None:
         if self.config.operation != "custom":
             raise ValueError("Use operation='custom' to set prompt directly.")
         self.config.custom_prompt = value
 
     @property
-    def custom_prompt(self) -> Optional[str]:
+    def custom_prompt(self) -> str | None:
         return self.config.custom_prompt if self.config.operation == "custom" else None
 
     @custom_prompt.setter
-    def custom_prompt(self, value: str):
+    def custom_prompt(self, value: str) -> None:
         if self.config.operation != "custom":
             raise ValueError("custom_prompt only allowed when operation='custom'")
         self.config.custom_prompt = value
@@ -1341,7 +1361,7 @@ class Gemma4VideoModel(Gemma4BaseModel):
         parsed = self._generate(messages)
         return parsed.get("content") or ""
 
-    def _parse_output(self, text: str, sample) -> dict:
+    def _parse_output(self, text: str, sample: fo.Sample | None) -> dict[str, Any]:
         """Parse video text output into FiftyOne labels."""
         if self.config.operation == "description":
             return {"summary": text}
@@ -1363,14 +1383,18 @@ class Gemma4VideoModel(Gemma4BaseModel):
 
     # -- Video parsers ---------------------------------------------------------
 
-    def _parse_temporal_only(self, data, sample) -> dict:
+    def _parse_temporal_only(
+        self, data: Any, sample: fo.Sample | None
+    ) -> dict[str, fol.TemporalDetections]:
         items = data if isinstance(data, list) else (data or {}).get("events", []) or []
         if not items:
             return {"events": fol.TemporalDetections(detections=[])}
         dets = self._parse_temporal_detections(items, sample, "events")
         return {"events": dets or fol.TemporalDetections(detections=[])}
 
-    def _parse_tracking_only(self, data, sample) -> dict:
+    def _parse_tracking_only(
+        self, data: Any, sample: fo.Sample | None
+    ) -> dict[str | int, Any]:
         items = (
             data if isinstance(data, list) else (data or {}).get("objects", []) or []
         )
@@ -1381,7 +1405,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
             return {"objects": fol.Detections(detections=[])}
         return {fn: {"objects": d} for fn, d in fd.items()}
 
-    def _parse_ocr_only(self, data, sample) -> dict:
+    def _parse_ocr_only(
+        self, data: Any, sample: fo.Sample | None
+    ) -> dict[str | int, Any]:
         items = (
             data
             if isinstance(data, list)
@@ -1394,7 +1420,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
             return {"text_content": fol.Detections(detections=[])}
         return {fn: {"text_content": d} for fn, d in fd.items()}
 
-    def _parse_comprehensive(self, data, sample) -> dict:
+    def _parse_comprehensive(
+        self, data: Any, sample: fo.Sample | None
+    ) -> dict[str, Any]:
         if not data or not isinstance(data, dict):
             return {"summary": str(data) if data else "No output"}
         labels = {}
@@ -1420,7 +1448,9 @@ class Gemma4VideoModel(Gemma4BaseModel):
                         labels.setdefault(fn, {})[k] = d
         return labels
 
-    def _parse_temporal_detections(self, items, sample, label_type):
+    def _parse_temporal_detections(
+        self, items: list[dict[str, Any]], sample: fo.Sample | None, label_type: str
+    ) -> fol.TemporalDetections | None:
         dets = []
         for item in items:
             if not isinstance(item, dict):
@@ -1446,7 +1476,12 @@ class Gemma4VideoModel(Gemma4BaseModel):
             )
         return fol.TemporalDetections(detections=dets) if dets else None
 
-    def _parse_frame_detections(self, items, sample, text_key=None):
+    def _parse_frame_detections(
+        self,
+        items: list[dict[str, Any]],
+        sample: fo.Sample | None,
+        text_key: str | None = None,
+    ) -> dict[int, fol.Detections]:
         fps = self._get_fps(sample)
         frames = {}
         for item in items:
@@ -1479,7 +1514,7 @@ class Gemma4VideoModel(Gemma4BaseModel):
         )
 
     @staticmethod
-    def _get_fps(sample) -> float:
+    def _get_fps(sample: fo.Sample | None) -> float:
         if sample:
             meta = getattr(sample, "metadata", None)
             if meta and hasattr(meta, "frame_rate"):
@@ -1488,7 +1523,7 @@ class Gemma4VideoModel(Gemma4BaseModel):
 
     # -- predict / predict_all -------------------------------------------------
 
-    def predict(self, arg, sample=None):
+    def predict(self, arg: Any, sample: fo.Sample | None = None) -> dict[str, Any]:
         if isinstance(arg, dict):
             item = arg
         else:
@@ -1509,15 +1544,17 @@ class Gemma4VideoModel(Gemma4BaseModel):
             }
         return self.predict_all([item], samples=[sample] if sample else None)[0]
 
-    def predict_all(self, batch: list, samples=None) -> list:
+    def predict_all(
+        self, batch: list[dict[str, Any]], samples: list[fo.Sample | None] | None = None
+    ) -> list[dict[str, Any]]:
         if not batch:
             return []
         if self._model is None:
             self._load_model()
 
-        results = []
+        results: list[dict[str, Any]] = []
         for i, item in enumerate(batch):
-            sample = samples[i] if samples else None
+            sample: fo.Sample | None = samples[i] if samples else None
             needs_meta = self.config.operation in (
                 "comprehensive",
                 "temporal_localization",

@@ -28,6 +28,7 @@ Usage:
 """
 
 import logging
+from typing import Any
 
 from huggingface_hub import snapshot_download
 from fiftyone.operators import types
@@ -44,7 +45,7 @@ from .zoo import (
 logger = logging.getLogger(__name__)
 
 
-def download_model(model_name: str, model_path: str):
+def download_model(model_name: str, model_path: str) -> None:
     """Download the Gemma 4 model from HuggingFace.
 
     Args:
@@ -54,7 +55,9 @@ def download_model(model_name: str, model_path: str):
     snapshot_download(repo_id=model_name, local_dir=model_path)
 
 
-def load_model(model_name: str = None, model_path: str = None, **kwargs):
+def load_model(
+    model_name: str | None = None, model_path: str | None = None, **kwargs: Any
+) -> Gemma4ImageModel | Gemma4VideoModel:
     """Load a Gemma 4 model for use with FiftyOne.
 
     Args:
@@ -98,9 +101,9 @@ def load_model(model_name: str = None, model_path: str = None, **kwargs):
     if model_path is None:
         model_path = "google/gemma-4-E4B-it"
 
-    media_type = kwargs.pop("media_type", "image")
+    media_type: str = kwargs.pop("media_type", "image")
 
-    config_dict = {"model_path": model_path}
+    config_dict: dict[str, Any] = {"model_path": model_path}
     config_dict.update(kwargs)
 
     if media_type == "video":
@@ -111,7 +114,7 @@ def load_model(model_name: str = None, model_path: str = None, **kwargs):
     return Gemma4ImageModel(config)
 
 
-def resolve_input(model_name: str, ctx):
+def resolve_input(model_name: str, ctx: Any) -> types.Property:
     """Define FiftyOne operator UI inputs for this model.
 
     Args:
