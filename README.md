@@ -1,79 +1,26 @@
 # Gemma 4 FiftyOne Zoo Model
 
-A FiftyOne remote zoo model integration for [Google Gemma 4](https://ai.google.dev/gemma), a multimodal vision-language model family supporting **image** and **video** understanding.
+<div align="center">
+  <a href="https://github.com/voxel51/fiftyone"><img src="https://user-images.githubusercontent.com/25985824/106288517-2422e000-6216-11eb-871d-26ad2e7b1e59.png" height="55px"> &nbsp;
+  <img src="https://user-images.githubusercontent.com/25985824/106288518-24bb7680-6216-11eb-8f10-60052c519586.png" height="50px"></a><br>
+  <img src=https://ai.google.dev/gemma/images/gemma4_banner.png width="380px">
+</div>
 
-Structured operations (detect, point, classify) use Gemma 4's native **function calling** for reliable structured output. Text operations (vqa, caption, ocr) use plain generation. All outputs go through `parse_response` for clean separation of thinking and content.
+A [FiftyOne](https://github.com/voxel51/fiftyone) remote Model Zoo integration for [Google Gemma 4](https://ai.google.dev/gemma), a multimodal vision-language model family supporting **image** and **video** understanding. Learn more about the [FiftyOne Model Zoo in the Voxel51 docs](https://docs.voxel51.com/model_zoo).
 
-## Quick Start
+Structured operations (detect, point, classify) use Gemma s4's native **function calling** for reliable structured output. Text operations (vqa, caption, ocr) use plain generation. All outputs go through `parse_response` for clean separation of thinking and content.
 
-```python
-import fiftyone as fo
-import fiftyone.zoo as foz
+## Table of Contents
 
-# Register the model source
-foz.register_zoo_model_source(
-    "https://github.com/Burhan-Q/gemma4",
-    overwrite=True,
-)
-
-# Download the model weights
-foz.download_zoo_model(
-    "https://github.com/Burhan-Q/gemma4",
-    model_name="google/gemma-4-E4B-it",
-)
-
-# Load a dataset and run inference
-dataset = foz.load_zoo_dataset("quickstart")
-
-model = foz.load_zoo_model(
-    "google/gemma-4-E4B-it",
-    media_type="image",
-    operation="vqa",
-)
-
-model.prompt = "Describe what is happening in this image."
-dataset.apply_model(model, label_field="description")
-
-session = fo.launch_app(dataset)
-```
-
----
-
-## Verifying Your Setup
-
-The included `examples.py` provides minimal, self-contained tests for each task type. Use it to quickly verify that Gemma 4 inference is working correctly on your machine.
-
-```bash
-# Using uv
-uv run examples.py detect
-
-# Using standard Python
-python examples.py detect
-
-# Run all image tasks
-uv run examples.py all
-# or
-python examples.py all
-```
-
-Available tasks: `vqa`, `caption`, `ocr`, `detect`, `point`, `classify`, `video_description`, `video_custom`, `all`
-
-Each task loads the smallest possible dataset slice (typically 2 samples), runs inference, and prints the full results including geometry data for spatial operations. Video tasks require `ffprobe` (see Installation for setup).
-
-Example output for detection:
-
-```
-=== detect ===
-  000880.jpg: 2 detections
-    label=wild turkey  bbox=[0.214, 0.013, 0.438, 0.768]
-    label=wild turkey  bbox=[0.751, 0.488, 0.22, 0.214]
-
-  001599.jpg: 2 detections
-    label=person  bbox=[0.602, 0.034, 0.233, 0.597]
-    label=horse  bbox=[0.178, 0.284, 0.822, 0.715]
-
-  [OK] Detect
-```
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Supported Models](#supported-models)
+- [Image Operations](#image-operations)
+- [Video Operations](#video-operations)
+- [Configuration Parameters](#configuration-parameters)
+- [Thinking Mode](#thinking-mode)
+- [Additional Info](ADDITIONAL_INFO.md) (setup verification, architecture, logging, technical details)
+- [Citation](#citation)
 
 ---
 
@@ -116,6 +63,41 @@ choco install ffmpeg
 
 ---
 
+## Quick Start
+
+```python
+import fiftyone as fo
+import fiftyone.zoo as foz
+
+# Register the model source
+foz.register_zoo_model_source(
+    "https://github.com/Burhan-Q/gemma4",
+    overwrite=True,
+)
+
+# Download the model weights
+foz.download_zoo_model(
+    "https://github.com/Burhan-Q/gemma4",
+    model_name="google/gemma-4-E4B-it",
+)
+
+# Load a dataset and run inference
+dataset = foz.load_zoo_dataset("quickstart")
+
+model = foz.load_zoo_model(
+    "google/gemma-4-E4B-it",
+    media_type="image",
+    operation="vqa",
+)
+
+model.prompt = "Describe what is happening in this image."
+dataset.apply_model(model, label_field="description")
+
+session = fo.launch_app(dataset)
+```
+
+---
+
 ## Supported Models
 
 | Model | Effective Params | Context | Modalities | VRAM (est.) |
@@ -130,13 +112,31 @@ choco install ffmpeg
 - The **26B-A4B** model (MoE architecture) requires **CUDA**. It does not currently run on Apple Silicon MPS due to a missing `torch.histc` implementation for the MoE expert routing layer.
 - All instruction-tuned models use the `-it` suffix. Base (pre-trained) models exist but are not supported by this integration since they lack the chat template and tool calling capabilities.
 
+### ⚠️ Important
+
+Use short prompts for better results, especially for smaller models.
+
 ---
 
 ## Image Operations
 
 Load the model with `media_type="image"` (the default). Switch operations by setting `model.operation`.
 
-### Visual Question Answering
+```python
+dataset = foz.load_zoo_dataset("quickstart")
+dataset.compute_metadata()
+
+model = foz.load_zoo_model(
+    "google/gemma-4-E4B-it",
+    media_type="image",
+)
+```
+
+<details><summary>👈 Expand for all image tasks</summary>
+
+### Visual Question Answering (VQA)
+
+<details><summary>Prompt model with questions to answer about images.</summary><p>
 
 ```python
 model = foz.load_zoo_model("google/gemma-4-E4B-it", operation="vqa")
@@ -149,7 +149,13 @@ print(dataset.first().q_vqa)  # fo.Classification with label=text
 
 **Output**: `fo.Classification`
 
-### Caption
+</details>
+
+---
+
+### Image Captioning
+
+<details><summary>Model provides detailed captioning of image scene</summary><p>
 
 ```python
 model = foz.load_zoo_model("google/gemma-4-E4B-it", operation="caption")
@@ -160,7 +166,13 @@ dataset.apply_model(model, label_field="caption")
 
 **Output**: `fo.Classification`
 
-### Object Detection
+</details>
+
+---
+
+### Image Object Detection
+
+<details><summary>Model classifies and locates objects spatially in images.</summary><p>
 
 Uses function calling with the `report_detections` tool. The model outputs bounding boxes in its native `box_2d` format with `[y1, x1, y2, x2]` coordinates scaled 0-1000, which are automatically converted to FiftyOne's `[x, y, w, h]` in `[0, 1]` range.
 
@@ -177,7 +189,13 @@ for det in dataset.first().dets.detections:
 
 **Output**: `fo.Detections`
 
-### Keypoint Detection
+</details>
+
+---
+
+### Image Keypoint Detection
+
+<details><summary>Model classifies objects and places single keypoint at object's center</summary><p>
 
 Uses function calling with the `report_points` tool. Coordinates follow the same `[y, x]` native format, auto-converted to `[x, y]` for FiftyOne.
 
@@ -193,7 +211,13 @@ for kp in dataset.first().pts.keypoints:
 
 **Output**: `fo.Keypoints`
 
+</details>
+
+---
+
 ### Image Classification
+
+<details><summary>Model generates labels for objects in image</summary><p>
 
 Uses function calling with the `report_classifications` tool.
 
@@ -209,7 +233,13 @@ for c in dataset.first().cls.classifications:
 
 **Output**: `fo.Classifications`
 
-### OCR
+</details>
+
+---
+
+### Image Optical Character Recognition (OCR)
+
+<details><summary>Model extracts text from images.</summary><p>
 
 Best results with document images. Use `max_soft_tokens=560` or higher for fine text.
 
@@ -232,6 +262,10 @@ print(dataset.first().text.label)
 
 **Output**: `fo.Classification`
 
+</details>
+
+---
+
 ### Per-Sample Prompts
 
 Use a dataset field as the prompt source for each sample:
@@ -251,6 +285,8 @@ dataset.apply_model(
 )
 ```
 
+---
+
 ### Overriding the System Prompt
 
 Each operation has a default system prompt. Override it for custom behavior:
@@ -262,6 +298,8 @@ model.prompt = "Find any scratches, dents, or discoloration."
 
 dataset.apply_model(model, label_field="defects")
 ```
+
+</details>
 
 ---
 
@@ -281,9 +319,13 @@ model = foz.load_zoo_model(
 )
 ```
 
-### Description
+---
 
-Plain-text summary. Does not require metadata.
+<details><summary>👈 Expand for all video tasks</summary>
+
+### Video Description
+
+<details><summary>Plain-text summary. Does not require metadata.</summary><p>
 
 ```python
 model.operation = "description"
@@ -291,9 +333,13 @@ video_dataset.apply_model(model, label_field="desc")
 # result: sample.desc_summary (str)
 ```
 
-### Temporal Localization
+</details>
 
-Detects activity events with start/end timestamps.
+---
+
+### Video Temporal Localization
+
+<details><summary>Detects activity events with start/end timestamps.</summary><p>
 
 ```python
 model.operation = "temporal_localization"
@@ -301,9 +347,13 @@ video_dataset.apply_model(model, label_field="events")
 # result: sample.events_events (fo.TemporalDetections)
 ```
 
-### Object Tracking
+</details>
 
-Tracks objects across frames with per-frame bounding boxes.
+---
+
+### Video Object Tracking
+
+<details><summary>Tracks objects across frames with per-frame bounding boxes.</summary><p>
 
 ```python
 model.operation = "tracking"
@@ -311,9 +361,13 @@ video_dataset.apply_model(model, label_field="tracking")
 # result: sample.frames[N].tracking_objects (fo.Detections)
 ```
 
+</details>
+
+---
+
 ### Video OCR
 
-Extracts text with bounding boxes per frame.
+<details><summary>Extracts text with bounding boxes per frame.</summary><p>
 
 ```python
 model.operation = "ocr"
@@ -321,16 +375,24 @@ video_dataset.apply_model(model, label_field="vocr")
 # result: sample.frames[N].vocr_text_content (fo.Detections)
 ```
 
-### Comprehensive Analysis
+</details>
 
-All analyses in a single pass: summary, events, objects, scene info, activities.
+---
+
+### Video Comprehensive Analysis
+
+<details><summary>All analyses in a single pass: summary, events, objects, scene info, activities.</summary><p>
 
 ```python
 model.operation = "comprehensive"
 video_dataset.apply_model(model, label_field="analysis")
 ```
 
-### Custom Prompts
+</details>
+
+---
+
+### Video Custom Prompts
 
 Full control over the prompt for domain-specific analysis.
 
@@ -346,29 +408,7 @@ video_dataset.apply_model(model, label_field="count")
 # result: sample.count_result (str)
 ```
 
----
-
-## Thinking Mode
-
-Gemma 4 supports a reasoning mode where the model shows step-by-step thinking before its answer.
-
-```python
-model = foz.load_zoo_model(
-    "google/gemma-4-E4B-it",
-    operation="detect",
-    enable_thinking=True,
-)
-
-model.prompt = "Detect all road signs in this image."
-dataset.apply_model(model, label_field="signs")
-
-# Reasoning is stored as a dynamic attribute on each label
-det = dataset.first().signs.detections[0]
-print(det.label)
-print(det["reasoning"])  # model's thinking chain, if present
-```
-
-**Important**: Thinking mode significantly increases token usage and inference time. For structured operations (detect, point, classify), thinking can cause the model to exhaust its generation budget before producing the tool call. It is recommended to keep `enable_thinking=False` (the default) for structured operations and increase `max_new_tokens` if you do enable it.
+</details>
 
 ---
 
@@ -400,7 +440,7 @@ model.temperature = 0.5
 | `top_k` | 64 | Top-k sampling parameter |
 | `do_sample` | True | Sampling (True) vs greedy decoding (False) |
 | `repetition_penalty` | 1.0 | Penalize repeated tokens |
-| `enable_thinking` | False | Enable step-by-step reasoning mode. See Thinking Mode section for caveats. |
+| `enable_thinking` | False | Enable step-by-step reasoning mode. See [Thinking Mode](#thinking-mode) for caveats. |
 | `cache_implementation` | None | KV cache strategy for `generate()`. `"static"` pre-allocates cache (used in official Gemma 4 examples). May not work with all model variants (e.g., 26B MoE). |
 
 ### Vision Parameters
@@ -413,8 +453,8 @@ Operation-specific defaults for `max_soft_tokens`:
 
 | Operation | Default | Rationale |
 |-----------|---------|-----------|
-| detect, point | 280 | Balanced detail for object localization |
-| classify, vqa, caption | 280 | General-purpose |
+| detect, point, classify | 280 | Balanced detail for object localization |
+| vqa, caption | 280 | General-purpose |
 | ocr | 560 | Higher resolution needed for text extraction |
 
 Override for your use case:
@@ -429,95 +469,33 @@ model = foz.load_zoo_model(..., operation="detect", max_soft_tokens=140)
 
 ---
 
-## Architecture
+## Thinking Mode
 
-### Inference Pipeline
+Gemma 4 supports a reasoning mode where the model shows step-by-step thinking before its answer.
 
+```python
+model = foz.load_zoo_model(
+    "google/gemma-4-E4B-it",
+    operation="detect",
+    enable_thinking=True,
+)
+
+model.prompt = "Detect all road signs in this image."
+dataset.apply_model(model, label_field="signs")
+
+# Reasoning is stored as a dynamic attribute on each label
+det = dataset.first().signs.detections[0]
+print(det.label)
+print(det["reasoning"])  # model's thinking chain, if present
 ```
-apply_chat_template (with tools= for structured ops)
-  -> model.generate
-  -> processor.decode (skip_special_tokens=False)
-  -> processor.parse_response -> {role, thinking, content, tool_calls}
-  -> extract tool_calls arguments (structured) or content text (free-form)
-  -> convert to FiftyOne Label
-```
 
-All inference goes through `parse_response`, which separates thinking traces from content and tool calls. For structured operations, tool calling produces pre-parsed dicts that don't require JSON extraction from free text.
-
-### Gemma 4 Native Formats
-
-The model uses specific native formats for spatial outputs that differ from some other VLMs:
-
-- **Bounding boxes**: `box_2d` key with `[y1, x1, y2, x2]` coordinates in 0-1000 scale
-- **Points**: `point_2d` key with `[y, x]` coordinates in 0-1000 scale
-
-These are automatically converted to FiftyOne's standard formats:
-- Detections: `[x, y, width, height]` in `[0, 1]` range
-- Keypoints: `[[x, y]]` in `[0, 1]` range
-
-### Structured Operations (detect, point, classify)
-
-These operations pass tool definitions to `apply_chat_template`, leveraging Gemma 4's native function calling. The model produces structured tool call arguments that are already parsed dicts. If `parse_response` fails to extract the tool call (e.g., due to malformed JSON in the arguments), a fallback parser attempts to recover the data from the raw output.
-
-### Text Operations (vqa, caption, ocr)
-
-These operations use plain generation without tools. The content text from `parse_response` is wrapped in `fo.Classification(label=text)`.
-
-### Return Types
-
-All image operations return a **single FiftyOne Label instance** (not a dict), compatible with any `label_field` path:
-
-| Operation | FiftyOne Type |
-|-----------|--------------|
-| `vqa` | `fo.Classification` |
-| `caption` | `fo.Classification` |
-| `ocr` | `fo.Classification` |
-| `detect` | `fo.Detections` |
-| `point` | `fo.Keypoints` |
-| `classify` | `fo.Classifications` |
-
-Video operations return dicts (sample-level and/or frame-level labels).
+**Important**: Thinking mode significantly increases token usage and inference time. For structured operations (detect, point, classify), thinking can cause the model to exhaust its generation budget before producing the tool call. It is recommended to keep `enable_thinking=False` (the default) for structured operations and increase `max_new_tokens` if you do enable it.
 
 ---
 
-## Logging
+## Additional Information
 
-Logging is controlled via environment variables. By default, the logger outputs at `INFO` level to stderr.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FIFTYONE_GEMMA4_LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `FIFTYONE_GEMMA4_LOGFILE` | (unset) | Set to `1`, `true`, or `True` to enable logging to file |
-
-Log files are named `run-001.log`, `run-002.log`, etc. in the current working directory, auto-incrementing.
-
-```bash
-# Verbose console logging
-FIFTYONE_GEMMA4_LOG_LEVEL=DEBUG python my_script.py
-
-# Enable file logging (creates run-001.log, etc.)
-FIFTYONE_GEMMA4_LOGFILE=1 python my_script.py
-
-# Both: debug to console + file
-FIFTYONE_GEMMA4_LOG_LEVEL=DEBUG FIFTYONE_GEMMA4_LOGFILE=1 python my_script.py
-```
-
-At `DEBUG` level, the full raw model output is logged for each sample -- useful for diagnosing parsing failures.
-
----
-
-## Technical Details
-
-- **Model class**: Uses `AutoModelForImageTextToText` from `transformers` (not `AutoModelForMultimodalLM`), matching the official transformers documentation for Gemma 4.
-- **Coordinate system**: Gemma 4 outputs coordinates as `[y1, x1, y2, x2]` in 0-1000 scale using the `box_2d` key. These are auto-converted to FiftyOne's `[x, y, w, h]` in `[0, 1]` range.
-- **dtype**: `bfloat16` on Ampere+ GPUs (CUDA compute capability >= 8.0), `auto` otherwise. MPS and CPU are also supported for dense models.
-- **MoE limitation**: The 26B-A4B model (Mixture-of-Experts) requires CUDA. It cannot run on MPS due to an unimplemented `torch.histc` operation in the expert routing layer.
-- **Video handling**: Gemma 4 processes video natively -- no frame extraction needed. Video is limited to 60 seconds per the model specification. Requires `ffprobe`.
-- **Metadata requirement**: Video operations that produce temporal or frame-level labels require `dataset.compute_metadata()`.
-- **Inference**: Samples are processed sequentially (one at a time) to manage GPU memory.
-- **DataLoader compatibility**: The collate function is defined at module level for pickle compatibility with multiprocessing DataLoader workers.
-- **JSON repair**: Minimal repair is applied for trivial JSON errors (double commas, trailing commas, double-wrapped brackets). Fundamentally malformed JSON from the model is not repaired -- that is a model quality issue.
-- **Free-form JSON is unreliable**: Without tool calling, the model frequently produces garbled JSON (wrong keys, unquoted values, broken structure). Tool calling is essential for reliable structured output from Gemma 4.
+See **[ADDITIONAL_INFO.md](ADDITIONAL_INFO.md)** for setup verification, architecture details, logging configuration, and technical details.
 
 ---
 
