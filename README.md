@@ -44,16 +44,21 @@ session = fo.launch_app(dataset)
 The included `examples.py` provides minimal, self-contained tests for each task type. Use it to quickly verify that Gemma 4 inference is working correctly on your machine.
 
 ```bash
-# Run a single task
+# Using uv
 uv run examples.py detect
+
+# Using standard Python
+python examples.py detect
 
 # Run all image tasks
 uv run examples.py all
+# or
+python examples.py all
 ```
 
 Available tasks: `vqa`, `caption`, `ocr`, `detect`, `point`, `classify`, `video_description`, `video_custom`, `all`
 
-Each task loads the smallest possible dataset slice (typically 2 samples), runs inference, and prints the full results including geometry data for spatial operations. Video tasks require `ffprobe` (install via `brew install ffmpeg` on macOS).
+Each task loads the smallest possible dataset slice (typically 2 samples), runs inference, and prints the full results including geometry data for spatial operations. Video tasks require `ffprobe` (see Installation for setup).
 
 Example output for detection:
 
@@ -74,20 +79,39 @@ Example output for detection:
 
 ## Installation
 
+Using `pip`:
+
 ```bash
-pip install fiftyone transformers>=4.52.0 torch torchvision accelerate huggingface-hub
+pip install fiftyone "transformers>=4.52.0" torch torchvision accelerate huggingface-hub
+```
+
+Or using [`uv`](https://docs.astral.sh/uv/):
+
+```bash
+uv add fiftyone "transformers>=4.52.0" torch torchvision accelerate huggingface-hub
 ```
 
 For video processing, you also need `torchcodec` and `ffmpeg`:
 
 ```bash
+# pip
 pip install torchcodec
 
+# or uv
+uv add torchcodec
+```
+
+`ffmpeg` must be installed separately as a system package:
+
+```bash
 # macOS
 brew install ffmpeg
 
 # Ubuntu/Debian
 sudo apt install ffmpeg
+
+# Windows (via chocolatey)
+choco install ffmpeg
 ```
 
 ---
