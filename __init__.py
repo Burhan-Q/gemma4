@@ -103,7 +103,7 @@ def load_model(
 
     media_type: str = kwargs.pop("media_type", "image")
 
-    config_dict: dict[str, Any] = {"model_path": model_path}
+    config_dict: dict[str, Any] = {"model_path": model_path, "model_name": model_name}
     config_dict.update(kwargs)
 
     if media_type == "video":

@@ -25,7 +25,6 @@ import json
 import logging
 import os
 import re
-from collections.abc import Callable
 from typing import Any, Self
 
 import torch
@@ -35,7 +34,7 @@ import fiftyone.core.labels as fol
 import fiftyone.core.models as fom
 import fiftyone.utils.torch as fout
 from fiftyone.core.models import SupportsGetItem, TorchModelMixin
-from fiftyone.utils.torch import GetItem
+from fiftyone.utils.torch import ImageGetItem
 
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -320,31 +319,6 @@ def get_device() -> str:
     return "cpu"
 
 
-def _identity_collate(batch: list[Any]) -> list[Any]:
-    """Module-level identity collate (picklable for DataLoader workers)."""
-    return batch
-
-
-# =============================================================================
-# Shared GetItem
-# =============================================================================
-
-
-class Gemma4GetItem(GetItem):
-    """Extracts filepath, optional per-sample prompt, and metadata."""
-
-    @property
-    def required_keys(self) -> list[str]:
-        return ["filepath", "metadata"]
-
-    def __call__(self, sample_dict: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "filepath": sample_dict["filepath"],
-            "prompt": sample_dict.get("prompt_field"),
-            "metadata": sample_dict.get("metadata"),
-        }
-
-
 # =============================================================================
 # Base config
 # =============================================================================
@@ -361,6 +335,7 @@ class Gemma4BaseConfig(fout.TorchImageModelConfig):
         self.model_path = self.parse_string(
             d, "model_path", default="google/gemma-4-E4B-it"
         )
+        self.model_name = d.get("model_name", "google/gemma-4-E4B-it")
         # Higher default to accommodate model thinking before tool calls
         self.max_new_tokens: int = self.parse_number(d, "max_new_tokens", default=2048)
         self.do_sample: bool = self.parse_bool(d, "do_sample", default=True)
@@ -431,14 +406,22 @@ class Gemma4BaseModel(fom.Model, fom.SamplesMixin, SupportsGetItem, TorchModelMi
     def has_collate_fn(self) -> bool:
         return True
 
-    @property
-    def collate_fn(self) -> Callable[[list[Any]], list[Any]]:
-        return _identity_collate
+    # collate_fn is inherited from TorchModelMixin — a @staticmethod
+    # that returns batch as-is. Because it's defined on a fiftyone
+    # class (not gemma4), DataLoader workers can resolve it without
+    # needing to import the gemma4 module.
 
     def build_get_item(
         self, field_mapping: dict[str, str] | None = None
-    ) -> Gemma4GetItem:
-        return Gemma4GetItem(field_mapping=field_mapping)
+    ) -> ImageGetItem:
+        # Uses fiftyone's ImageGetItem (always importable by DataLoader
+        # workers) with raw_inputs=True so that PIL Images are returned
+        # directly. Workers load images in parallel; predict_all receives
+        # PIL Images and passes them straight to the processor.
+        return ImageGetItem(
+            field_mapping=field_mapping,
+            raw_inputs=True,
+        )
 
     # -- Model loading ---------------------------------------------------------
 
@@ -961,13 +944,21 @@ class Gemma4ImageModel(Gemma4BaseModel):
 
     # -- Inference -------------------------------------------------------------
 
-    def _run_inference(self, filepath: str, prompt: str) -> fol.Label:
-        """Run inference on a single image. Returns a FiftyOne Label."""
-        logger.info(
-            "[%s] %s",
-            self.config.operation,
-            os.path.basename(filepath),
-        )
+    def _run_inference(self, image: Any, prompt: str) -> fol.Label:
+        """Run inference on a single image. Returns a FiftyOne Label.
+
+        Args:
+            image: filepath string or PIL Image
+            prompt: user prompt text
+        """
+        if isinstance(image, str):
+            logger.info("[%s] %s", self.config.operation, os.path.basename(image))
+            image_content = {"type": "image", "url": image}
+        else:
+            logger.info(
+                "[%s] <PIL %s>", self.config.operation, getattr(image, "size", "?")
+            )
+            image_content = {"type": "image", "image": image}
 
         messages = [
             {
@@ -977,7 +968,7 @@ class Gemma4ImageModel(Gemma4BaseModel):
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "url": filepath},
+                    image_content,
                     {"type": "text", "text": prompt},
                 ],
             },
@@ -1234,25 +1225,12 @@ class Gemma4ImageModel(Gemma4BaseModel):
     # -- predict / predict_all -------------------------------------------------
 
     def predict(self, arg: Any, sample: fo.Sample | None = None) -> fol.Label:
-        if isinstance(arg, dict):
-            item = arg
-        else:
-            fp = (
-                arg
-                if isinstance(arg, str)
-                else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
-            )
-            prompt = None
-            if sample and "prompt_field" in self._fields:
-                fn = self._fields["prompt_field"]
-                if sample.has_field(fn):
-                    prompt = sample.get_field(fn)
-            item = {"filepath": fp, "prompt": prompt, "metadata": None}
-
-        return self.predict_all([item], samples=[sample] if sample else None)[0]
+        return self.predict_all([arg], samples=[sample] if sample else None)[0]
 
     def predict_all(
-        self, batch: list[dict[str, Any]], samples: list[fo.Sample | None] | None = None
+        self,
+        batch: list[Any],
+        samples: list[fo.Sample | None] | None = None,
     ) -> list[fol.Label]:
         if not batch:
             return []
@@ -1260,14 +1238,35 @@ class Gemma4ImageModel(Gemma4BaseModel):
             self._load_model()
 
         results: list[fol.Label] = []
-        for item in batch:
-            prompt = item.get("prompt") or self.config.prompt
+        for i, item in enumerate(batch):
+            sample = samples[i] if samples and i < len(samples) else None
+
+            # Resolve image: PIL Image (from DataLoader), filepath str
+            # (from simple path), or dict (from direct calls)
+            if isinstance(item, dict):
+                image = item.get("filepath", item.get("image"))
+                prompt = item.get("prompt")
+            elif isinstance(item, str):
+                image = item
+                prompt = None
+            else:
+                # PIL Image from ImageGetItem
+                image = item
+                prompt = None
+
+            # Get prompt from sample if not provided directly
+            if prompt is None and sample and "prompt_field" in self._fields:
+                fn = self._fields["prompt_field"]
+                if sample.has_field(fn):
+                    prompt = sample.get_field(fn)
+
+            prompt = prompt or self.config.prompt
             if not prompt:
                 raise ValueError(
                     f"No prompt for '{self.config.operation}'. "
                     "Set model.prompt or pass prompt_field."
                 )
-            results.append(self._run_inference(item["filepath"], prompt))
+            results.append(self._run_inference(image, prompt))
         return results
 
 
@@ -1292,7 +1291,7 @@ class Gemma4VideoModelConfig(Gemma4BaseConfig):
             raise ValueError("custom_prompt required when operation='custom'")
         if self.operation != "custom" and self.custom_prompt is not None:
             raise ValueError("custom_prompt only allowed when operation='custom'")
-        if self.model_path not in _VIDEO_CAPABLE_MODELS:
+        if self.model_name not in _VIDEO_CAPABLE_MODELS:
             raise ValueError(
                 f"'{self.model_path}' doesn't support video. "
                 f"Use one of: {sorted(_VIDEO_CAPABLE_MODELS)}"
@@ -1524,28 +1523,12 @@ class Gemma4VideoModel(Gemma4BaseModel):
     # -- predict / predict_all -------------------------------------------------
 
     def predict(self, arg: Any, sample: fo.Sample | None = None) -> dict[str, Any]:
-        if isinstance(arg, dict):
-            item = arg
-        else:
-            fp = (
-                arg
-                if isinstance(arg, str)
-                else getattr(arg, "inpath", getattr(arg, "path", str(arg)))
-            )
-            prompt = None
-            if sample and "prompt_field" in self._fields:
-                fn = self._fields["prompt_field"]
-                if sample.has_field(fn):
-                    prompt = sample.get_field(fn)
-            item = {
-                "filepath": fp,
-                "prompt": prompt,
-                "metadata": getattr(sample, "metadata", None) if sample else None,
-            }
-        return self.predict_all([item], samples=[sample] if sample else None)[0]
+        return self.predict_all([arg], samples=[sample] if sample else None)[0]
 
     def predict_all(
-        self, batch: list[dict[str, Any]], samples: list[fo.Sample | None] | None = None
+        self,
+        batch: list[Any],
+        samples: list[fo.Sample | None] | None = None,
     ) -> list[dict[str, Any]]:
         if not batch:
             return []
@@ -1555,24 +1538,43 @@ class Gemma4VideoModel(Gemma4BaseModel):
         results: list[dict[str, Any]] = []
         for i, item in enumerate(batch):
             sample: fo.Sample | None = samples[i] if samples else None
+
+            # Resolve filepath and prompt from item or sample
+            if isinstance(item, dict):
+                filepath = item.get("filepath")
+                prompt = item.get("prompt")
+                metadata = item.get("metadata")
+            elif isinstance(item, str):
+                filepath = item
+                prompt = None
+                metadata = getattr(sample, "metadata", None) if sample else None
+            else:
+                filepath = getattr(sample, "filepath", None) if sample else None
+                prompt = None
+                metadata = getattr(sample, "metadata", None) if sample else None
+
+            if prompt is None and sample and "prompt_field" in self._fields:
+                fn = self._fields["prompt_field"]
+                if sample.has_field(fn):
+                    prompt = sample.get_field(fn)
+
             needs_meta = self.config.operation in (
                 "comprehensive",
                 "temporal_localization",
                 "tracking",
                 "ocr",
             )
-            if needs_meta and not item.get("metadata"):
+            if needs_meta and not metadata:
                 raise ValueError(
                     f"'{self.config.operation}' requires metadata. Call dataset.compute_metadata()."
                 )
 
-            prompt = item.get("prompt")
             if self.config.operation == "custom" and prompt:
                 pass  # use per-sample prompt
             else:
                 prompt = self.prompt
 
-            text = self._run_inference(item["filepath"], prompt)
+            text = self._run_inference(filepath, prompt)
             labels = self._parse_output(text, sample)
             if not any(isinstance(k, int) for k in labels):
                 labels["raw"] = text
